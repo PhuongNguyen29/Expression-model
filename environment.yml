@@ -1,0 +1,22 @@
+name: biomarker-dl
+channels:
+  - pytorch
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.9
+  - pytorch>=1.12
+  - numpy=1.23.*
+  - pandas=1.5.*
+  - scikit-learn=1.2.*
+  - scipy
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - lifelines  # For survival analysis
+  - shap       # For model interpretation
+  - pip
+  - pip:
+    - pycox     # Deep survival models
+    - scikit-survival
+    - captum    # PyTorch model interpretation

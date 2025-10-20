@@ -1,0 +1,140 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Virtual Environments
+env/
+venv/
+ENV/
+.venv
+conda-env/
+*.conda
+.conda/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data - CRITICAL for biomedical data
+data/
+raw_data/
+processed_data/
+*.csv
+*.tsv
+*.xlsx
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.feather
+*.parquet
+
+# TCGA/ORIEN specific
+tcga_data/
+orien_data/
+clinical_data/
+expression_data/
+*.gct
+*.gct.gz
+*.maf
+
+# Model files
+models/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pb
+saved_models/
+model_weights/
+
+# Results but keep directory structure
+results/*
+!results/.gitkeep
+figures/*
+!figures/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.cache
+logs/
+wandb/
+mlruns/
+tensorboard/
+.tensorboard/
+
+# Environment and secrets
+.env
+.env.local
+*.key
+*.pem
+config/secrets.yaml
+credentials/
+
+# Output files
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.eps
+!figures/examples/*
+
+# Documentation build
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# OS files
+.DS_Store
+Thumbs.db
+.Trash-*
+
+# Slurm/HPC job files
+slurm-*.out
+*.err
+*.out
+job_logs/
+
+# R files (if using R for any analysis)
+.Rhistory
+.Rdata
+.Rproj.user/
+
+# Large files
+*.zip
+*.tar
+*.tar.gz
+*.gz
+!requirements.txt
+!environment.yml
