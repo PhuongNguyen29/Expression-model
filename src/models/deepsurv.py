@@ -374,6 +374,56 @@ class DeepSurvTrainer:
         
         return total_loss / n_batches
     
+    def evaluate(self, data_loader) -> Tuple[float, float]:
+        """
+        Evaluate model on validation/test set.
+        
+        Args:
+            data_loader: Validation/test data loader
+            
+        Returns:
+            avg_loss: Average validation loss
+            c_index: Concordance index
+        """
+        self.model.eval()
+        total_loss = 0
+        n_batches = 0
+        
+        all_risks = []
+        all_times = []
+        all_events = []
+        
+        with torch.no_grad():
+            for batch in data_loader:
+                features = batch['features'].to(self.device)
+                times = batch['time'].to(self.device)
+                events = batch['event'].to(self.device)
+                
+                # Forward pass
+                log_hazards = self.model(features)
+                
+                # Calculate loss
+                loss = self.criterion(log_hazards, times, events)
+                total_loss += loss.item()
+                n_batches += 1
+                
+                # Store predictions for C-index
+                risks = torch.exp(log_hazards).squeeze().cpu().numpy()
+                all_risks.extend(risks)
+                all_times.extend(times.cpu().numpy())
+                all_events.extend(events.cpu().numpy())
+        
+        # Calculate C-index with error handling
+        from lifelines.utils import concordance_index
+        try:
+            c_index = concordance_index(all_times, -np.array(all_risks), all_events)
+        except Exception as e:
+            logger.error(f"C-index calculation failed: {e}")
+            raise RuntimeError(f"Failed to calculate C-index: {e}")
+        
+        avg_loss = total_loss / n_batches
+        return avg_loss, c_index
+    
     def fit(
         self,
         train_loader,
@@ -469,6 +519,3 @@ def calculate_concordance_index(
     
     from lifelines.utils import concordance_index
     return concordance_index(all_times, -np.array(all_risks), all_events)
-
-
-from collections import OrderedDict
