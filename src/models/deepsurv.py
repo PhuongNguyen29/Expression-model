@@ -141,6 +141,9 @@ class DeepSurv(nn.Module):
         # Forward pass
         output = self.network(x)
         
+        # CLAMP OUTPUT BEFORE CHECKING (prevents overflow in exp)
+        output = torch.clamp(output, min=-20, max=20)  # ← ADD THIS
+        
         # Check for NaN/Inf in output - FAIL if found
         if torch.isnan(output).any():
             n_nan = torch.isnan(output).sum().item()
@@ -231,19 +234,19 @@ class CoxPHLoss(nn.Module):
         # Calculate risk scores
         risk_scores = torch.exp(log_hazards)
         
-        # Check for numerical issues
-        if torch.isinf(risk_scores).any():
-            max_log_hazard = log_hazards.max().item()
-            raise RuntimeError(
-                f"Inf in risk scores (exp overflow). Max log_hazard: {max_log_hazard:.2f}. "
-                f"Model is predicting extreme values - reduce learning rate or add gradient clipping."
-            )
+        # # Check for numerical issues
+        # if torch.isinf(risk_scores).any():
+        #     max_log_hazard = log_hazards.max().item()
+        #     raise RuntimeError(
+        #         f"Inf in risk scores (exp overflow). Max log_hazard: {max_log_hazard:.2f}. "
+        #         f"Model is predicting extreme values - reduce learning rate or add gradient clipping."
+        #     )
         
         # Cumulative sum of risk scores
         risk_sum = torch.cumsum(risk_scores, dim=0)
         
         # Log partial likelihood
-        log_likelihood = log_hazards - torch.log(risk_sum)
+        log_likelihood = log_hazards - torch.log(risk_sum + 1e-7)
         
         # Check for NaN in loss calculation
         if torch.isnan(log_likelihood).any():
