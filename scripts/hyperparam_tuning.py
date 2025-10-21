@@ -18,6 +18,7 @@ from optuna.trial import TrialState
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, Any, Tuple
+from sklearn.model_selection import StratifiedKFold
 
 # Your existing modules
 from src.data.dataset import SurvivalDataset
@@ -46,8 +47,8 @@ class DeepSurvHyperparameterTuner:
         self,
         train_expr: pd.DataFrame,
         train_surv: pd.DataFrame,
-        valid_expr: pd.DataFrame = None,
-        valid_surv: pd.DataFrame = None,
+        # valid_expr: pd.DataFrame = None,
+        # valid_surv: pd.DataFrame = None,
         cohort_name: str = None,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         seed: int = 42
@@ -69,6 +70,12 @@ class DeepSurvHyperparameterTuner:
         self.n_features = train_expr.shape[0]
         self.n_samples = train_expr.shape[1]
         
+        self.full_dataset = SurvivalDataset(train_expr, train_surv)
+        self.events = train_surv['event'].values  # For stratification
+        self.use_kfold = True  # Flag to use k-fold
+        self.n_folds = 5
+
+        
         logger.info(f"Cohort: {cohort_name}")
         logger.info(f"Number of features (genes): {self.n_features}")
         logger.info(f"Number of training samples: {self.n_samples}")
@@ -77,26 +84,26 @@ class DeepSurvHyperparameterTuner:
         # Set seeds
         self._set_seed(seed)
         
-        # Create datasets
-        if valid_expr is None:
-            # Split training data
-            full_dataset = SurvivalDataset(train_expr, train_surv)
-            n_samples = len(full_dataset)
-            n_valid = int(n_samples * 0.2)
-            n_train = n_samples - n_valid
+        # # Create datasets
+        # if valid_expr is None:
+        #     # Split training data
+        #     full_dataset = SurvivalDataset(train_expr, train_surv)
+        #     n_samples = len(full_dataset)
+        #     n_valid = int(n_samples * 0.2)
+        #     n_train = n_samples - n_valid
             
-            train_dataset, valid_dataset = torch.utils.data.random_split(
-                full_dataset, [n_train, n_valid],
-                generator=torch.Generator().manual_seed(seed)
-            )
-            self.train_dataset = train_dataset
-            self.valid_dataset = valid_dataset
-        else:
-            self.train_dataset = SurvivalDataset(train_expr, train_surv)
-            self.valid_dataset = SurvivalDataset(valid_expr, valid_surv)
+        #     train_dataset, valid_dataset = torch.utils.data.random_split(
+        #         full_dataset, [n_train, n_valid],
+        #         generator=torch.Generator().manual_seed(seed)
+        #     )
+        #     self.train_dataset = train_dataset
+        #     self.valid_dataset = valid_dataset
+        # else:
+        #     self.train_dataset = SurvivalDataset(train_expr, train_surv)
+        #     self.valid_dataset = SurvivalDataset(valid_expr, valid_surv)
         
-        logger.info(f"Training samples: {len(self.train_dataset)}")
-        logger.info(f"Validation samples: {len(self.valid_dataset)}")
+        # logger.info(f"Training samples: {len(self.train_dataset)}")
+        # logger.info(f"Validation samples: {len(self.valid_dataset)}")
     
     def _set_seed(self, seed: int):
         """Set all random seeds for reproducibility."""
@@ -111,68 +118,63 @@ class DeepSurvHyperparameterTuner:
     def create_model(self, trial: optuna.Trial) -> DeepSurv:
         """
         Create model with hyperparameters suggested by Optuna.
-        
-        Based on hyperparameter ranges from:
-        - Original DeepSurv paper (Katzman et al., 2018)
-        - Kvamme et al., 2019 (Time-to-event prediction review)
-        - Our empirical experience with genomic data
         """
-        if self.n_samples < 500:  # TCGA
-            first_layer_options = [128, 256]
-            max_layers = 2
-            dropout_min, dropout_max = 0.2,0.3  
-        elif self.n_samples < 1200:  # ORIEN  
-            first_layer_options = [128, 256, 512]
-            max_layers = 3
-            dropout_min, dropout_max = 0.3, 0.5  # Moderate dropout
-        else:  # Combined
-            first_layer_options = [256, 512, 1024]
-            max_layers = 3
-            dropout_min, dropout_max = 0.2, 0.5  # Standard dropout
+        """Create model with sample-size-aware constraints."""
+    
+        if self.n_samples < 500:  # TCGA - keep it simple
+            n_layers = trial.suggest_int('n_layers', 1, 2)
+            
+            if n_layers == 1:
+                hidden_sizes = [trial.suggest_categorical('layer_0', [128, 256])]
+            else:
+                # Two-layer: only safe combinations
+                first = trial.suggest_categorical('layer_0', [256, 384])  # Not 512
+                second = trial.suggest_categorical('layer_1', [64, 128])
+                hidden_sizes = [first, second]
+            
+            dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
+            # weight_decay_range = (1e-3, 1e-1)
+            
+        else :  # ORIEN
+            n_layers = trial.suggest_int('n_layers', 2, 3)
+            if n_layers == 2:
+                pattern = trial.suggest_categorical('pattern_2', ['512-128', '384-96', '256-64'])
+                hidden_sizes = [int(x) for x in pattern.split('-')]
+            else:  # n_layers == 3
+                pattern = trial.suggest_categorical('pattern_3', ['512-256-64', '384-192-48', '256-128-32'])
+                hidden_sizes = [int(x) for x in pattern.split('-')]
+            
+            dropout = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
+        # weight_decay_range = (1e-4, 1e-2)
+  
+        # # Network architecture
+        # n_layers = trial.suggest_int('n_layers', 1, 4)
+        # hidden_sizes = []
         
-        # Network architecture
-        n_layers = trial.suggest_int('n_layers', 1, 4)
-        hidden_sizes = []
+        # # First layer size (larger for genomic data)
+        # first_layer = trial.suggest_categorical(
+        #     'first_layer_size', 
+        #     first_layer_options
+        # )
+        # hidden_sizes.append(first_layer)
         
-        # First layer size (larger for genomic data)
-        first_layer = trial.suggest_categorical(
-            'first_layer_size', 
-            first_layer_options
-        )
-        hidden_sizes.append(first_layer)
+        # # Subsequent layers (decreasing size)
+        # for i in range(1, n_layers):
+        #     prev_size = hidden_sizes[-1]
+        #     # Each layer is 50% to 100% of previous layer size
+        #     layer_size = trial.suggest_int(
+        #         f'layer_{i}_size',
+        #         int(prev_size * 0.25),
+        #         int(prev_size * 0.75),
+        #         step=32
+        #     )
+        #     hidden_sizes.append(layer_size)
         
-        # Subsequent layers (decreasing size)
-        for i in range(1, n_layers):
-            prev_size = hidden_sizes[-1]
-            # Each layer is 50% to 100% of previous layer size
-            layer_size = trial.suggest_int(
-                f'layer_{i}_size',
-                int(prev_size * 0.25),
-                int(prev_size * 0.75),
-                step=32
-            )
-            hidden_sizes.append(layer_size)
-        
-        # Regularization
-        dropout = trial.suggest_float('dropout', dropout_min, dropout_max, step=0.1)
-        
-        # Activation function
-        activation = trial.suggest_categorical(
-            'activation',
-            ['relu', 'elu']
-        )
-        
-        if dropout > 0.5:
-            batch_norm = False  # Don't use batch norm with high dropout
-        else:
-            batch_norm = trial.suggest_categorical('batch_norm', [True, False])
-        
-        # Weight initialization
-        weight_init = trial.suggest_categorical(
-            'weight_init',
-            ['xavier_normal', 'kaiming_uniform']
-        )
-        
+        activation = trial.suggest_categorical('activation', ['relu', 'elu'])
+        batch_norm = trial.suggest_categorical('batch_norm', [True, False]) if dropout <= 0.4 else False
+        weight_init = trial.suggest_categorical('weight_init', ['xavier_normal', 'kaiming_uniform'])
+    
+            
         # Create model
         model = DeepSurv(
             n_features=self.n_features,
@@ -188,86 +190,94 @@ class DeepSurvHyperparameterTuner:
     
     def objective(self, trial: optuna.Trial) -> float:
         """
-        Objective function for Optuna optimization.
+        Objective function for Optuna optimization using stratified k-fold CV.
         
         Returns:
-            Negative C-index (we minimize, so negative for maximization)
+            Mean C-index across all folds
         """
         
-        # Suggest hyperparameters
+        # Suggest training hyperparameters ONCE per trial
         if self.n_samples < 500:  # TCGA
             batch_size = trial.suggest_categorical('batch_size', [16, 32])
-            weight_decay_min, weight_decay_max = 1e-3, 1e-1  # Strong L2
-        elif self.n_samples < 1200:  # ORIEN
+            weight_decay = trial.suggest_float('weight_decay', 1e-3, 1e-1, log=True)  # Strong L2
+        else:  # ORIEN
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
-            weight_decay_min, weight_decay_max = 1e-4, 1e-2  # Moderate L2
-        else:  # Combined
-            batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
-            weight_decay_min, weight_decay_max = 1e-5, 1e-2  # Standard L2
+            weight_decay = trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)  # Moderate L2
         
         learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-        weight_decay = trial.suggest_float('weight_decay', weight_decay_min, weight_decay_max, log=True)
-
-        # Create data loaders
-        train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=2 if not self.device == 'mps' else 0,
-            pin_memory=torch.cuda.is_available()
-        )
-        
-        valid_loader = DataLoader(
-            self.valid_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=2 if not self.device == 'mps' else 0,
-            pin_memory=torch.cuda.is_available()
-        )
-        
-        # Create model
-        model = self.create_model(trial)
-        
-        # Create trainer
-        trainer = DeepSurvTrainer(
-            model=model,
-            device=self.device,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            scheduler_patience=10
-        )
-        
-        # Training loop with early stopping
-        n_epochs = 100  # Max epochs
-        early_stopping_patience = 15
-        best_cindex = 0
-        patience_counter = 0
-        
-        for epoch in range(n_epochs):
-            # Train
-            train_loss = trainer.train_epoch(train_loader)
+        skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
+        cv_scores = []
             
-            # Validate
-            valid_loss, valid_cindex = trainer.evaluate(valid_loader)
+        for fold, (train_idx, val_idx) in enumerate(skf.split(
+            range(len(self.full_dataset)), self.events
+        )):
+            # Reset seed for reproducibility
+            self._set_seed(self.seed + fold)
             
-            # Report intermediate value for pruning
-            trial.report(valid_cindex, epoch)
+            # Create data loaders for this fold
+            train_sampler = torch.utils.data.SubsetRandomSampler(train_idx)
+            val_sampler = torch.utils.data.SubsetRandomSampler(val_idx)
             
-            # Handle pruning (early termination of bad trials)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+            train_loader = DataLoader(
+                self.full_dataset, 
+                batch_size=batch_size,
+                sampler=train_sampler,
+                num_workers=0
+            )
             
-            # Early stopping
-            if valid_cindex > best_cindex:
-                best_cindex = valid_cindex
-                patience_counter = 0
-            else:
-                patience_counter += 1
+            val_loader = DataLoader(
+                self.full_dataset,
+                batch_size=batch_size, 
+                sampler=val_sampler,
+                num_workers=0
+            )
             
-            if patience_counter >= early_stopping_patience:
-                break
+            # Create fresh model for this fold
+            model = self.create_model(trial)
+            
+            # Create trainer with complete parameters
+            trainer = DeepSurvTrainer(
+                model=model,
+                device=self.device,
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                scheduler_patience=5  # Shorter patience for CV
+            )
+            
+            # Train this fold with early stopping
+            best_fold_cindex = 0
+            patience_counter = 0
+            max_patience = 10
+            
+            for epoch in range(50):  # Max 50 epochs per fold for efficiency
+                train_loss = trainer.train_epoch(train_loader)
+                _, val_cindex = trainer.evaluate(val_loader)
+                
+                # Track best C-index for this fold
+                if val_cindex > best_fold_cindex:
+                    best_fold_cindex = val_cindex
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                # Early stopping for this fold
+                if patience_counter >= max_patience:
+                    break
+                
+                # Optuna pruning (optional - prunes bad trials early)
+                trial.report(val_cindex, fold * 50 + epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+            
+            cv_scores.append(best_fold_cindex)
+            logger.info(f"  Fold {fold+1}/{self.n_folds}: C-index = {best_fold_cindex:.4f}")
         
-        return best_cindex  # Optuna maximizes by default
+        # Return mean C-index across folds (standard practice)
+        mean_cindex = np.mean(cv_scores)
+        std_cindex = np.std(cv_scores)
+        logger.info(f"Trial complete: Mean C-index = {mean_cindex:.4f} ± {std_cindex:.4f}")
+        
+        return mean_cindex
     
     def optimize(
         self,
@@ -327,6 +337,292 @@ class DeepSurvHyperparameterTuner:
         return best_params, study
 
 
+def train_final_model_on_full_cohort(
+    best_params: Dict[str, Any],
+    train_expr: pd.DataFrame,
+    train_surv: pd.DataFrame,
+    cohort_name: str,
+    output_dir: str,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+) -> Dict[str, Any]:
+    """
+    Train final model on 100% of source cohort for bidirectional validation.
+    
+    This is the correct protocol for transfer learning:
+    1. Use k-fold CV to select hyperparameters (done in optimize())
+    2. Train final model on ALL source data (this function)
+    3. Test on 100% of target cohort (done separately in evaluation script)
+    
+    Args:
+        best_params: Best hyperparameters from optimization
+        train_expr: Full training expression data
+        train_surv: Full training survival data
+        cohort_name: Name of cohort
+        output_dir: Directory to save model
+        device: Device to train on
+        
+    Returns:
+        Dictionary with model and training history
+    """
+    
+    logger.info(f"\nTraining final model on 100% of {cohort_name} cohort...")
+    logger.info(f"Samples: {train_expr.shape[1]}, Features: {train_expr.shape[0]}")
+    
+    # Reconstruct model architecture from best_params
+    hidden_sizes = []
+    n_layers = best_params['n_layers']
+    
+    # Handle different parameter naming based on architecture
+    if 'layer_0' in best_params:
+        # TCGA style: individual layer parameters
+        for i in range(n_layers):
+            layer_key = f'layer_{i}'
+            if layer_key in best_params:
+                hidden_sizes.append(best_params[layer_key])
+    elif 'pattern_2' in best_params:
+        # ORIEN style: pattern for 2 layers
+        hidden_sizes = [int(x) for x in best_params['pattern_2'].split('-')]
+    elif 'pattern_3' in best_params:
+        # ORIEN style: pattern for 3 layers
+        hidden_sizes = [int(x) for x in best_params['pattern_3'].split('-')]
+    else:
+        raise ValueError(f"Cannot reconstruct architecture from best_params: {best_params}")
+    
+    # Create model with best hyperparameters
+    model = DeepSurv(
+        n_features=train_expr.shape[0],
+        hidden_sizes=hidden_sizes,
+        dropout=best_params['dropout'],
+        activation=best_params['activation'],
+        batch_norm=best_params.get('batch_norm', False),
+        weight_init=best_params['weight_init']
+    )
+    
+    logger.info(f"Model architecture: {hidden_sizes}")
+    logger.info(f"Dropout: {best_params['dropout']}, Activation: {best_params['activation']}")
+    
+    # Create dataset and loader (use ALL data, no validation split)
+    full_dataset = SurvivalDataset(train_expr, train_surv)
+    train_loader = DataLoader(
+        full_dataset,
+        batch_size=best_params['batch_size'],
+        shuffle=True,
+        num_workers=0
+    )
+    
+    # Create trainer
+    trainer = DeepSurvTrainer(
+        model=model,
+        device=device,
+        learning_rate=best_params['learning_rate'],
+        weight_decay=best_params['weight_decay'],
+        scheduler_patience=10
+    )
+    
+    # Train on full data (monitor training loss only, no validation)
+    n_epochs = 200
+    train_losses = []
+    
+    logger.info("Training on full cohort (no validation split)...")
+    for epoch in range(n_epochs):
+        train_loss = trainer.train_epoch(train_loader)
+        train_losses.append(train_loss)
+        
+        if (epoch + 1) % 20 == 0:
+            logger.info(f"Epoch {epoch+1}/{n_epochs}: Training Loss = {train_loss:.4f}")
+    
+    # Save model
+    model_path = f"{output_dir}/final_model_{cohort_name}.pth"
+    torch.save(model.state_dict(), model_path)
+    logger.info(f"Model saved to {model_path}")
+    
+    # Save training history
+    history = {
+        'train_loss': train_losses,
+        'architecture': hidden_sizes,
+        'hyperparameters': best_params
+    }
+    
+    with open(f"{output_dir}/training_history_{cohort_name}.json", 'w') as f:
+        json.dump(history, f, indent=2)
+    
+    return {
+        'model': model,
+        'history': history,
+        'final_train_loss': train_losses[-1]
+    }
+
+
+# def run_hyperparameter_search(
+#     cohort: str = 'tcga',
+#     n_trials: int = 50,
+#     output_dir: str = None
+# ):
+#     """
+#     Run hyperparameter search for specified cohort.
+#     """
+    
+#     # Create output directory
+#     if output_dir is None:
+#         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#         output_dir = f"results/hyperparam_tuning_{cohort}_{timestamp}"
+#     os.makedirs(output_dir, exist_ok=True)
+    
+#     # Load data
+#     logger.info(f"Loading data for {cohort} cohort...")
+#     tcga_expr = pd.read_csv("data/processed/tcga_preprocessed.csv", index_col=0)
+#     orien_expr = pd.read_csv("data/processed/orien_preprocessed.csv", index_col=0)
+#     surv_tcga = pd.read_csv("data/processed/surv_tcga_harmonized.csv", index_col=0)
+#     surv_orien = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
+    
+#     # Prepare data based on cohort
+#     if cohort.lower() == 'tcga':
+#         train_expr, train_surv = tcga_expr, surv_tcga
+#     elif cohort.lower() == 'orien':
+#         train_expr, train_surv = orien_expr, surv_orien
+#     elif cohort.lower() == 'combined':
+#         # Combine both cohorts (concatenate along samples axis)
+#         train_expr = pd.concat([tcga_expr, orien_expr], axis=1)
+#         train_surv = pd.concat([surv_tcga, surv_orien])
+#     else:
+#         raise ValueError(f"Unknown cohort: {cohort}")
+    
+#     # Create tuner with cohort name
+#     tuner = DeepSurvHyperparameterTuner(
+#         train_expr=train_expr,
+#         train_surv=train_surv,
+#         cohort_name=cohort
+#     )
+    
+#     # Run optimization
+#     best_params, study = tuner.optimize(
+#         n_trials=n_trials,
+#         study_name=f"deepsurv_{cohort}"
+#     )
+    
+#     # Save results
+#     with open(f"{output_dir}/best_params.json", 'w') as f:
+#         json.dump(best_params, f, indent=2)
+    
+#     # Save study
+#     study.trials_dataframe().to_csv(f"{output_dir}/trials.csv", index=False)
+    
+#     # Visualize optimization history
+#     visualize_optimization(study, output_dir)
+    
+#     # Train final model with best parameters
+#     logger.info("\nTraining final model with best parameters...")
+#     final_results = train_with_best_params(
+#         best_params, train_expr, train_surv, output_dir
+#     )
+    
+#     # Add summary statistics
+#     summary = {
+#         'cohort': cohort,
+#         'n_samples': train_expr.shape[1],
+#         'n_features': train_expr.shape[0],
+#         'feature_to_sample_ratio': train_expr.shape[0] / train_expr.shape[1],
+#         'best_cindex': study.best_value,
+#         'n_trials': len(study.trials),
+#         'best_params': best_params
+#     }
+    
+#     with open(f"{output_dir}/summary.json", 'w') as f:
+#         json.dump(summary, f, indent=2)
+    
+#     logger.info(f"\nResults saved to {output_dir}")
+    
+#     return best_params, study, final_results
+
+def visualize_optimization(study: optuna.Study, output_dir: str):
+    """
+    Create visualization plots for the optimization study.
+    
+    Based on: Akiba et al., 2019 - Optuna visualization best practices
+    """
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    
+    # 1. Optimization history
+    ax = axes[0, 0]
+    trials = study.trials_dataframe()
+    ax.plot(trials.index, trials['value'], 'b-', alpha=0.5, label='All trials')
+    best_values = trials['value'].cummax()
+    ax.plot(trials.index, best_values, 'r-', linewidth=2, label='Best so far')
+    ax.set_xlabel('Trial')
+    ax.set_ylabel('C-index')
+    ax.set_title('Optimization History')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Parameter importance (if enough trials)
+    if len(study.trials) >= 10:
+        try:
+            importance = optuna.importance.get_param_importances(study)
+            ax = axes[0, 1]
+            params = list(importance.keys())[:10]  # Top 10
+            values = list(importance.values())[:10]
+            ax.barh(params, values)
+            ax.set_xlabel('Importance')
+            ax.set_title('Hyperparameter Importance')
+        except Exception as e:
+            axes[0, 1].text(0.5, 0.5, f'Insufficient trials\nfor importance analysis\n({len(study.trials)} trials)',
+                           ha='center', va='center')
+    
+    # 3. Distribution of trial values
+    ax = axes[0, 2]
+    ax.hist(trials['value'], bins=20, alpha=0.7, edgecolor='black')
+    ax.axvline(study.best_value, color='r', linestyle='--', linewidth=2, label='Best')
+    ax.set_xlabel('C-index')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Distribution of Trial Performances')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 4. Learning rate vs C-index
+    if 'params_learning_rate' in trials.columns:
+        ax = axes[1, 0]
+        ax.scatter(trials['params_learning_rate'], trials['value'], alpha=0.5)
+        ax.set_xlabel('Learning Rate (log scale)')
+        ax.set_ylabel('C-index')
+        ax.set_xscale('log')
+        ax.set_title('Learning Rate vs Performance')
+        ax.grid(True, alpha=0.3)
+    else:
+        axes[1, 0].text(0.5, 0.5, 'No learning_rate data', ha='center', va='center')
+    
+    # 5. Dropout vs C-index
+    if 'params_dropout' in trials.columns:
+        ax = axes[1, 1]
+        ax.scatter(trials['params_dropout'], trials['value'], alpha=0.5)
+        ax.set_xlabel('Dropout Rate')
+        ax.set_ylabel('C-index')
+        ax.set_title('Dropout vs Performance')
+        ax.grid(True, alpha=0.3)
+    else:
+        axes[1, 1].text(0.5, 0.5, 'No dropout data', ha='center', va='center')
+    
+    # 6. Weight decay vs C-index
+    if 'params_weight_decay' in trials.columns:
+        ax = axes[1, 2]
+        ax.scatter(trials['params_weight_decay'], trials['value'], alpha=0.5, c=trials['value'], cmap='viridis')
+        ax.set_xlabel('Weight Decay (log scale)')
+        ax.set_ylabel('C-index')
+        ax.set_xscale('log')
+        ax.set_title('Weight Decay vs Performance')
+        ax.grid(True, alpha=0.3)
+        plt.colorbar(ax.collections[0], ax=ax, label='C-index')
+    else:
+        axes[1, 2].text(0.5, 0.5, 'No weight_decay data', ha='center', va='center')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/optimization_plots.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    logger.info(f"Optimization plots saved to {output_dir}/optimization_plots.png")
+
+
 def run_hyperparameter_search(
     cohort: str = 'tcga',
     n_trials: int = 50,
@@ -334,7 +630,16 @@ def run_hyperparameter_search(
 ):
     """
     Run hyperparameter search for specified cohort.
+    
+    Args:
+        cohort: Which cohort to optimize ('tcga' or 'orien')
+        n_trials: Number of optimization trials
+        output_dir: Directory to save results
     """
+    
+    # Validate cohort
+    if cohort.lower() not in ['tcga', 'orien']:
+        raise ValueError(f"Cohort must be 'tcga' or 'orien', got: {cohort}")
     
     # Create output directory
     if output_dir is None:
@@ -349,198 +654,104 @@ def run_hyperparameter_search(
     surv_tcga = pd.read_csv("data/processed/surv_tcga_harmonized.csv", index_col=0)
     surv_orien = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
     
-    # Prepare data based on cohort
+    # Select data based on cohort
     if cohort.lower() == 'tcga':
         train_expr, train_surv = tcga_expr, surv_tcga
-    elif cohort.lower() == 'orien':
+    else:  # orien
         train_expr, train_surv = orien_expr, surv_orien
-    elif cohort.lower() == 'combined':
-        # Combine both cohorts (concatenate along samples axis)
-        train_expr = pd.concat([tcga_expr, orien_expr], axis=1)
-        train_surv = pd.concat([surv_tcga, surv_orien])
-    else:
-        raise ValueError(f"Unknown cohort: {cohort}")
     
-    # Create tuner with cohort name
+    # Create tuner
     tuner = DeepSurvHyperparameterTuner(
         train_expr=train_expr,
         train_surv=train_surv,
         cohort_name=cohort
     )
     
-    # Run optimization
+    # Run optimization with stratified k-fold CV
     best_params, study = tuner.optimize(
         n_trials=n_trials,
         study_name=f"deepsurv_{cohort}"
     )
     
-    # Save results
+    # Save optimization results
     with open(f"{output_dir}/best_params.json", 'w') as f:
         json.dump(best_params, f, indent=2)
     
-    # Save study
     study.trials_dataframe().to_csv(f"{output_dir}/trials.csv", index=False)
     
-    # Visualize optimization history
+    # Visualize optimization
     visualize_optimization(study, output_dir)
     
-    # Train final model with best parameters
-    logger.info("\nTraining final model with best parameters...")
-    final_results = train_with_best_params(
-        best_params, train_expr, train_surv, output_dir
+    # Train final model on 100% of cohort
+    logger.info("\n" + "="*60)
+    logger.info("TRAINING FINAL MODEL ON FULL COHORT")
+    logger.info("="*60)
+    
+    final_results = train_final_model_on_full_cohort(
+        best_params=best_params,
+        train_expr=train_expr,
+        train_surv=train_surv,
+        cohort_name=cohort,
+        output_dir=output_dir
     )
     
-    # Add summary statistics
+    # Save summary
     summary = {
         'cohort': cohort,
         'n_samples': train_expr.shape[1],
         'n_features': train_expr.shape[0],
         'feature_to_sample_ratio': train_expr.shape[0] / train_expr.shape[1],
-        'best_cindex': study.best_value,
+        'cv_best_cindex': study.best_value,  # From k-fold CV
         'n_trials': len(study.trials),
-        'best_params': best_params
+        'best_params': best_params,
+        'final_train_loss': final_results['final_train_loss']
     }
     
     with open(f"{output_dir}/summary.json", 'w') as f:
         json.dump(summary, f, indent=2)
     
-    logger.info(f"\nResults saved to {output_dir}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"OPTIMIZATION COMPLETE FOR {cohort.upper()}")
+    logger.info(f"{'='*60}")
+    logger.info(f"Best CV C-index: {study.best_value:.4f}")
+    logger.info(f"Final training loss: {final_results['final_train_loss']:.4f}")
+    logger.info(f"Results saved to: {output_dir}")
+    logger.info(f"{'='*60}\n")
     
     return best_params, study, final_results
-
-
-def train_with_best_params(
-    best_params: Dict[str, Any],
-    train_expr: pd.DataFrame,
-    train_surv: pd.DataFrame,
-    output_dir: str
-) -> Dict[str, Any]:
-    """
-    Train final model with best hyperparameters.
-    """
-    
-    # FIX 6: Correct dimension for n_features
-    model_params = {
-        'n_features': train_expr.shape[0],  # Genes are in rows
-        'hidden_sizes': [],
-        'dropout': best_params['dropout'],
-        'activation': best_params['activation'],
-        'batch_norm': best_params.get('batch_norm', False),  # May not exist if dropout > 0.5
-        'weight_init': best_params['weight_init']
-    }
-    
-    # Reconstruct hidden sizes
-    n_layers = best_params['n_layers']
-    model_params['hidden_sizes'].append(best_params['first_layer_size'])
-    for i in range(1, n_layers):
-        if f'layer_{i}_size' in best_params:
-            model_params['hidden_sizes'].append(best_params[f'layer_{i}_size'])
-    
-    # Create model
-    model = DeepSurv(**model_params)
-    
-    # Create data loaders
-    dataset = SurvivalDataset(train_expr, train_surv)
-    n_samples = len(dataset)
-    n_valid = int(n_samples * 0.2)
-    n_train = n_samples - n_valid
-    
-    train_dataset, valid_dataset = torch.utils.data.random_split(
-        dataset, [n_train, n_valid],
-        generator=torch.Generator().manual_seed(42)
-    )
-    
-    # FIX 7: Handle pin_memory
-    use_pin_memory = torch.cuda.is_available()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_workers = 2 if device != 'mps' else 0
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=best_params['batch_size'],
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=use_pin_memory
-    )
-    
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=best_params['batch_size'],
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=use_pin_memory
-    )
-    
-    # Train model
-    trainer = DeepSurvTrainer(
-        model=model,
-        learning_rate=best_params['learning_rate'],
-        weight_decay=best_params['weight_decay']
-    )
-    
-    history = trainer.fit(
-        train_loader=train_loader,
-        valid_loader=valid_loader,
-        n_epochs=200,
-        early_stopping_patience=20,
-        verbose=True
-    )
-    
-    # Save model
-    torch.save(model.state_dict(), f"{output_dir}/best_model.pth")
-    
-    # Save training history with proper type conversion
-    def convert_to_serializable(obj):
-        if isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        elif isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: convert_to_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_to_serializable(item) for item in obj]
-        else:
-            return obj
-    
-    with open(f"{output_dir}/training_history.json", 'w') as f:
-        json.dump(convert_to_serializable(history), f, indent=2)
-    
-    return {
-        'model': model,
-        'history': history,
-        'best_valid_cindex': max(history['valid_cindex'])
-    }
-
-
-def visualize_optimization(study: optuna.Study, output_dir: str):
-    """Create visualization plots for the optimization study."""
-    # [Keep existing visualization code as-is]
-    pass  # Implementation remains the same
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Fixed hyperparameter tuning for DeepSurv')
-    parser.add_argument('--cohort', type=str, default='tcga',
-                       choices=['tcga', 'orien', 'combined'],
-                       help='Which cohort to optimize on')
-    parser.add_argument('--n_trials', type=int, default=50,
-                       help='Number of optimization trials')
+    parser = argparse.ArgumentParser(
+        description='Hyperparameter tuning for DeepSurv with stratified k-fold CV'
+    )
+    parser.add_argument(
+        '--cohort', 
+        type=str, 
+        default='tcga',
+        choices=['tcga', 'orien'],
+        help='Which cohort to optimize (tcga or orien)'
+    )
+    parser.add_argument(
+        '--n_trials', 
+        type=int, 
+        default=50,
+        help='Number of optimization trials'
+    )
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default=None,
+        help='Output directory (default: auto-generated)'
+    )
     
     args = parser.parse_args()
     
-    # Run single optimization
+    # Run optimization
     best_params, study, final_results = run_hyperparameter_search(
         cohort=args.cohort,
-        n_trials=args.n_trials
+        n_trials=args.n_trials,
+        output_dir=args.output_dir
     )
-    
-    print("\n" + "="*60)
-    print(f"OPTIMIZATION COMPLETE FOR {args.cohort.upper()}")
-    print("="*60)
-    print(f"Best C-index: {study.best_value:.4f}")
-    print(f"Final model C-index: {final_results['best_valid_cindex']:.4f}")
-    print("="*60)

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from collections import OrderedDict
 from typing import Dict, Tuple, Optional, List
 import logging
 
@@ -128,7 +129,38 @@ class DeepSurv(nn.Module):
         Returns:
             log_hazard: Log hazard ratios (batch_size, 1)
         """
-        return self.network(x)
+        # Check for NaN/Inf in input - FAIL if found
+        if torch.isnan(x).any():
+            n_nan = torch.isnan(x).sum().item()
+            raise ValueError(f"NaN detected in input features: {n_nan} values. Check data preprocessing.")
+        
+        if torch.isinf(x).any():
+            n_inf = torch.isinf(x).sum().item()
+            raise ValueError(f"Inf detected in input features: {n_inf} values. Check data preprocessing.")
+        
+        # Forward pass
+        output = self.network(x)
+        
+        # Check for NaN/Inf in output - FAIL if found
+        if torch.isnan(output).any():
+            n_nan = torch.isnan(output).sum().item()
+            raise RuntimeError(
+                f"NaN detected in model output: {n_nan} values. "
+                f"Likely causes: exploding gradients, extreme dropout ({self.dropout_prob}), "
+                f"or tiny layer sizes. Check hyperparameters."
+            )
+        
+        if torch.isinf(output).any():
+            n_inf = torch.isinf(output).sum().item()
+            raise RuntimeError(
+                f"Inf detected in model output: {n_inf} values. "
+                f"Likely causes: numerical overflow, extreme learning rate, or unstable architecture."
+            )
+        
+        return output
+
+        
+        # return self.network(x)
     
     def predict_risk(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -173,19 +205,18 @@ class CoxPHLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Calculate Cox partial likelihood loss.
-        
-        Args:
-            log_hazards: Predicted log hazard ratios (batch_size, 1)
-            times: Survival times (batch_size,)
-            events: Event indicators (batch_size,)
-            
-        Returns:
-            loss: Negative partial log-likelihood
         """
-        # Squeeze log_hazards to 1D
+        # Validate inputs
+        if torch.isnan(log_hazards).any():
+            raise ValueError("NaN in log_hazards - model output is invalid")
+        if torch.isnan(times).any():
+            raise ValueError("NaN in survival times - check data")
+        if torch.isnan(events).any():
+            raise ValueError("NaN in event indicators - check data")
+        
         log_hazards = log_hazards.squeeze()
         
-        # Sort by time (required for Cox loss)
+        # Sort by time
         sorted_indices = torch.argsort(times, descending=True)
         log_hazards = log_hazards[sorted_indices]
         times = times[sorted_indices]
@@ -194,18 +225,37 @@ class CoxPHLoss(nn.Module):
         # Calculate risk scores
         risk_scores = torch.exp(log_hazards)
         
-        # Cumulative sum of risk scores (risk set)
+        # Check for numerical issues
+        if torch.isinf(risk_scores).any():
+            max_log_hazard = log_hazards.max().item()
+            raise RuntimeError(
+                f"Inf in risk scores (exp overflow). Max log_hazard: {max_log_hazard:.2f}. "
+                f"Model is predicting extreme values - reduce learning rate or add gradient clipping."
+            )
+        
+        # Cumulative sum of risk scores
         risk_sum = torch.cumsum(risk_scores, dim=0)
         
         # Log partial likelihood
-        # For each event, log(risk_i / sum of risks in risk set)
         log_likelihood = log_hazards - torch.log(risk_sum)
         
-        # Only count events (censored observations don't contribute)
+        # Check for NaN in loss calculation
+        if torch.isnan(log_likelihood).any():
+            raise RuntimeError("NaN in log likelihood calculation - numerical instability in Cox loss")
+        
+        # Only count events
         log_likelihood = log_likelihood * events
         
-        # Negative log likelihood (we minimize this)
-        loss = -torch.sum(log_likelihood) / torch.sum(events).clamp(min=1)
+        # Check for events
+        n_events = torch.sum(events)
+        if n_events < 1:
+            raise ValueError("Batch contains no events - cannot calculate Cox loss. Use larger batch size.")
+        
+        # Negative log likelihood
+        loss = -torch.sum(log_likelihood) / n_events
+        
+        if torch.isnan(loss):
+            raise RuntimeError("NaN in final loss value - numerical instability")
         
         return loss
 
@@ -274,94 +324,55 @@ class DeepSurvTrainer:
         }
     
     def train_epoch(self, train_loader) -> float:
-        """
-        Train for one epoch.
-        
-        Args:
-            train_loader: Training data loader
-            
-        Returns:
-            avg_loss: Average training loss
-        """
+        """Train for one epoch - fail fast on any numerical issues."""
         self.model.train()
         total_loss = 0
         n_batches = 0
         
         for batch in train_loader:
-            # Move data to device
             features = batch['features'].to(self.device)
             times = batch['time'].to(self.device)
             events = batch['event'].to(self.device)
             
-            # Zero gradients
             self.optimizer.zero_grad()
             
-            # Forward pass
+            # Forward pass - will raise exception if NaN/Inf
             log_hazards = self.model(features)
             
-            # Calculate loss
+            # Calculate loss - will raise exception if NaN/Inf
             loss = self.criterion(log_hazards, times, events)
             
             # Backward pass
             loss.backward()
             
-            # Gradient clipping (prevents exploding gradients)
+            # Check gradient norms
+            total_norm = 0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    if torch.isnan(p.grad).any():
+                        raise RuntimeError("NaN in gradients - training is unstable")
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** 0.5
+            
+            if total_norm > 100.0:  # Very large gradients
+                raise RuntimeError(
+                    f"Exploding gradients detected: norm={total_norm:.2f}. "
+                    f"Reduce learning rate or check architecture."
+                )
+            
+            if total_norm > 10.0:
+                logger.warning(f"Large gradient norm: {total_norm:.2f}")
+            
+            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             
-            # Update weights
             self.optimizer.step()
             
             total_loss += loss.item()
             n_batches += 1
         
         return total_loss / n_batches
-    
-    def evaluate(self, data_loader) -> Tuple[float, float]:
-        """
-        Evaluate model on validation/test set.
-        
-        Args:
-            data_loader: Validation/test data loader
-            
-        Returns:
-            avg_loss: Average validation loss
-            c_index: Concordance index
-        """
-        self.model.eval()
-        total_loss = 0
-        n_batches = 0
-        
-        all_risks = []
-        all_times = []
-        all_events = []
-        
-        with torch.no_grad():
-            for batch in data_loader:
-                # Move data to device
-                features = batch['features'].to(self.device)
-                times = batch['time'].to(self.device)
-                events = batch['event'].to(self.device)
-                
-                # Forward pass
-                log_hazards = self.model(features)
-                
-                # Calculate loss
-                loss = self.criterion(log_hazards, times, events)
-                total_loss += loss.item()
-                n_batches += 1
-                
-                # Store predictions for C-index
-                risks = torch.exp(log_hazards).squeeze().cpu().numpy()
-                all_risks.extend(risks)
-                all_times.extend(times.cpu().numpy())
-                all_events.extend(events.cpu().numpy())
-        
-        # Calculate C-index
-        from lifelines.utils import concordance_index
-        c_index = concordance_index(all_times, -np.array(all_risks), all_events)
-        
-        avg_loss = total_loss / n_batches
-        return avg_loss, c_index
     
     def fit(
         self,
