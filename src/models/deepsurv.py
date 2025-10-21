@@ -203,9 +203,8 @@ class CoxPHLoss(nn.Module):
         times: torch.Tensor,
         events: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Calculate Cox partial likelihood loss.
-        """
+        """Calculate Cox partial likelihood loss."""
+        
         # Validate inputs
         if torch.isnan(log_hazards).any():
             raise ValueError("NaN in log_hazards - model output is invalid")
@@ -215,6 +214,13 @@ class CoxPHLoss(nn.Module):
             raise ValueError("NaN in event indicators - check data")
         
         log_hazards = log_hazards.squeeze()
+        
+        # Check for events FIRST (before any computation)
+        n_events = torch.sum(events)
+        if n_events < 1:
+            # Return zero loss with gradient (allows backprop but doesn't contribute)
+            logger.warning("Batch contains no events - returning zero loss")
+            return torch.tensor(0.0, device=log_hazards.device, requires_grad=True)
         
         # Sort by time
         sorted_indices = torch.argsort(times, descending=True)
@@ -246,11 +252,6 @@ class CoxPHLoss(nn.Module):
         # Only count events
         log_likelihood = log_likelihood * events
         
-        # Check for events
-        n_events = torch.sum(events)
-        if n_events < 1:
-            raise ValueError("Batch contains no events - cannot calculate Cox loss. Use larger batch size.")
-        
         # Negative log likelihood
         loss = -torch.sum(log_likelihood) / n_events
         
@@ -258,6 +259,7 @@ class CoxPHLoss(nn.Module):
             raise RuntimeError("NaN in final loss value - numerical instability")
         
         return loss
+
 
 
 class DeepSurvTrainer:

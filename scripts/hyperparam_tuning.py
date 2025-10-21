@@ -198,7 +198,7 @@ class DeepSurvHyperparameterTuner:
         
         # Suggest training hyperparameters ONCE per trial
         if self.n_samples < 500:  # TCGA
-            batch_size = trial.suggest_categorical('batch_size', [16, 32])
+            batch_size = trial.suggest_categorical('batch_size', [32, 48])
             weight_decay = trial.suggest_float('weight_decay', 1e-3, 1e-1, log=True)  # Strong L2
         else:  # ORIEN
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
@@ -222,14 +222,16 @@ class DeepSurvHyperparameterTuner:
                 self.full_dataset, 
                 batch_size=batch_size,
                 sampler=train_sampler,
-                num_workers=0
+                num_workers=0,
+                drop_last=False
             )
             
             val_loader = DataLoader(
                 self.full_dataset,
                 batch_size=batch_size, 
                 sampler=val_sampler,
-                num_workers=0
+                num_workers=0,
+                drop_last=False
             )
             
             # Create fresh model for this fold
