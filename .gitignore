@@ -1,4 +1,6 @@
-# Python
+# =====================================
+# Python and general build artifacts
+# =====================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,32 +11,43 @@ dist/
 build/
 .eggs/
 
+# =====================================
 # Jupyter Notebooks
+# =====================================
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 */.ipynb_checkpoints/*
 
+# =====================================
 # Virtual Environments
+# =====================================
 env/
 venv/
 ENV/
-.venv
+.venv/
 conda-env/
 *.conda
 .conda/
 
-# IDE
+# =====================================
+# IDE / OS metadata
+# =====================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
+.Trash-*
 
-# Data - CRITICAL for biomedical data
-data/
-raw_data/
-processed_data/
+# =====================================
+# Biomedical & large data (CRITICAL)
+# Ignore only top-level data folders
+# =====================================
+/data/
+/raw_data/
+/processed_data/
 *.csv
 *.tsv
 *.xlsx
@@ -47,27 +60,34 @@ processed_data/
 *.feather
 *.parquet
 
-# TCGA/ORIEN specific
-tcga_data/
-orien_data/
-clinical_data/
-expression_data/
+# =====================================
+# TCGA / ORIEN data
+# =====================================
+/tcga_data/
+/orien_data/
+/clinical_data/
+/expression_data/
 *.gct
 *.gct.gz
 *.maf
 
-# Model files
-models/
-checkpoints/
+# =====================================
+# Model files & large binaries
+# Ignore only top-level model folders
+# =====================================
+/models/
+/checkpoints/
+/saved_models/
+/model_weights/
 *.pth
 *.pt
 *.ckpt
-*.h5
 *.pb
-saved_models/
-model_weights/
+*.h5
 
-# Results but keep directory structure
+# =====================================
+# Results, figures, logs (keep structure)
+# =====================================
 results/*
 !results/.gitkeep
 figures/*
@@ -75,18 +95,25 @@ figures/*
 logs/*
 !logs/.gitkeep
 
-# Logs and temporary files
+# =====================================
+# Experiment / training artifacts
+# =====================================
 *.log
 *.tmp
 *.temp
 *.cache
-logs/
 wandb/
 mlruns/
 tensorboard/
 .tensorboard/
+job_logs/
+slurm-*.out
+*.err
+*.out
 
-# Environment and secrets
+# =====================================
+# Environment / credentials
+# =====================================
 .env
 .env.local
 *.key
@@ -94,7 +121,9 @@ tensorboard/
 config/secrets.yaml
 credentials/
 
-# Output files
+# =====================================
+# Output files (non-source)
+# =====================================
 *.pdf
 *.png
 *.jpg
@@ -103,38 +132,50 @@ credentials/
 *.eps
 !figures/examples/*
 
+# =====================================
 # Documentation build
+# =====================================
 docs/_build/
 docs/_static/
 docs/_templates/
 
-# Testing
+# =====================================
+# Testing & coverage
+# =====================================
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 
-# OS files
-.DS_Store
-Thumbs.db
-.Trash-*
-
-# Slurm/HPC job files
-slurm-*.out
-*.err
-*.out
-job_logs/
-
-# R files (if using R for any analysis)
+# =====================================
+# R / Miscellaneous
+# =====================================
 .Rhistory
 .Rdata
 .Rproj.user/
 
-# Large files
+# =====================================
+# Archives and large files
+# =====================================
 *.zip
 *.tar
 *.tar.gz
 *.gz
+
+# =====================================
+# Always include key text/config files
+# =====================================
 !requirements.txt
 !environment.yml
+
+# =====================================
+# --- Allow source code & configs ---
+# Never ignore Python or YAML code in these dirs
+# =====================================
+!src/**/*.py
+!src/**/*.ipynb
+!src/**/*.yaml
+!scripts/**/*.py
+!scripts/**/*.ipynb
+!config/**/*.yaml
