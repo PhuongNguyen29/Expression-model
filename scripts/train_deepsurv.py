@@ -165,6 +165,12 @@ def evaluate_transfer(model, test_loader, cohort_name):
     
     return results, np.array(all_risks)
 
+def ensure_float(value):
+    """Convert numpy floats to Python float."""
+    if isinstance(value, (np.float32, np.float64)):
+        return float(value)
+    return value
+
 def run_bidirectional_experiments():
     """Run all bidirectional transfer experiments."""
     
@@ -361,16 +367,16 @@ def run_bidirectional_experiments():
     
     summary = {
         'TCGA → ORIEN': {
-            'In-domain (TCGA)': results['tcga_to_orien']['validation_performance']['c_index'],
-            'Transfer (ORIEN)': results['tcga_to_orien']['transfer_performance']['c_index']
+            'In-domain (TCGA)': ensure_float(results['tcga_to_orien']['validation_performance']['c_index']),
+            'Transfer (ORIEN)': ensure_float(results['tcga_to_orien']['transfer_performance']['c_index'])
         },
         'ORIEN → TCGA': {
-            'In-domain (ORIEN)': results['orien_to_tcga']['validation_performance']['c_index'],
-            'Transfer (TCGA)': results['orien_to_tcga']['transfer_performance']['c_index']
+            'In-domain (ORIEN)': ensure_float(results['orien_to_tcga']['validation_performance']['c_index']),
+            'Transfer (TCGA)': ensure_float(results['orien_to_tcga']['transfer_performance']['c_index'])
         },
         'Combined Training': {
-            'TCGA': results['combined']['tcga_performance']['c_index'],
-            'ORIEN': results['combined']['orien_performance']['c_index']
+            'TCGA': ensure_float(results['combined']['tcga_performance']['c_index']),
+            'ORIEN': ensure_float(results['combined']['orien_performance']['c_index'])
         }
     }
     
@@ -384,8 +390,8 @@ def run_bidirectional_experiments():
             print(f"  {metric_name:.<30} {c_index:.4f}")
     
     # Calculate bidirectional stability
-    tcga_to_orien_cindex = results['tcga_to_orien']['transfer_performance']['c_index']
-    orien_to_tcga_cindex = results['orien_to_tcga']['transfer_performance']['c_index']
+    tcga_to_orien_cindex = ensure_float(results['tcga_to_orien']['transfer_performance']['c_index'])
+    orien_to_tcga_cindex = ensure_float(results['orien_to_tcga']['transfer_performance']['c_index'])
     stability = 1.0 - abs(tcga_to_orien_cindex - orien_to_tcga_cindex)
     
     print("\n" + "="*60)
