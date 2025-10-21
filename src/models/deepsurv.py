@@ -337,14 +337,8 @@ class DeepSurvTrainer:
             events = batch['event'].to(self.device)
             
             self.optimizer.zero_grad()
-            
-            # Forward pass - will raise exception if NaN/Inf
             log_hazards = self.model(features)
-            
-            # Calculate loss - will raise exception if NaN/Inf
             loss = self.criterion(log_hazards, times, events)
-            
-            # Backward pass
             loss.backward()
             
             # Check gradient norms
@@ -357,18 +351,16 @@ class DeepSurvTrainer:
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm ** 0.5
             
-            if total_norm > 100.0:  # Very large gradients
-                raise RuntimeError(
-                    f"Exploding gradients detected: norm={total_norm:.2f}. "
-                    f"Reduce learning rate or check architecture."
-                )
+            if total_norm > 100.0:
+                # Instead of RuntimeError, return inf to signal failure
+                logger.error(f"Exploding gradients: norm={total_norm:.2f}. Marking trial as failed.")
+                return float('inf')  # ← Signal bad trial
             
             if total_norm > 10.0:
                 logger.warning(f"Large gradient norm: {total_norm:.2f}")
             
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
             self.optimizer.step()
             
             total_loss += loss.item()

@@ -253,6 +253,9 @@ class DeepSurvHyperparameterTuner:
             
             for epoch in range(50):  # Max 50 epochs per fold for efficiency
                 train_loss = trainer.train_epoch(train_loader)
+                if train_loss == float('inf'):
+                    logger.warning(f"Trial failed due to exploding gradients in fold {fold+1}")
+                    raise optuna.TrialPruned()
                 _, val_cindex = trainer.evaluate(val_loader)
                 
                 # Track best C-index for this fold
