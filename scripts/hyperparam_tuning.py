@@ -120,7 +120,7 @@ class DeepSurvHyperparameterTuner:
         if self.n_samples < 500:  # TCGA
             first_layer_options = [64, 128, 256]
             max_layers = 2
-            dropout_min, dropout_max = 0.5, 0.8  # Heavy dropout
+            dropout_min, dropout_max = 0.3, 0.5  # Heavy dropout
         elif self.n_samples < 1200:  # ORIEN  
             first_layer_options = [128, 256, 512]
             max_layers = 3
