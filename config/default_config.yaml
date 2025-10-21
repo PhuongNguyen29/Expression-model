@@ -1,0 +1,89 @@
+# Project configuration
+project:
+  name: "bidirectional_biomarker_discovery"
+  description: "DL models for cross-cohort biomarker discovery"
+  seed: 42  # Global random seed for reproducibility
+  
+# Data configuration
+data:
+  # Data paths
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  
+  # File names
+  tcga_expression: "tcga_batch_corrected_2sv.csv"
+  orien_expression: "orien_batch_corrected.csv"
+  tcga_survival: "surv_tcga.csv"
+  orien_survival: "surv_orien_update.csv"
+  tcga_clinical: "clinical_tcga.csv"
+  orien_clinical: "clinical_orien_updated.csv"
+  
+  # Processing parameters
+  use_common_genes: true  # CRITICAL: Only use genes present in both cohorts
+  min_variance_percentile: 10  # Remove bottom 10% variance genes
+  log_transform: false  # Data already log-transformed
+  standardize: true  # Z-score standardization per cohort
+  
+  # Train/test split
+  test_size: 0.2
+  stratify_split: true  # Stratify by event status
+  
+# Model configuration
+model:
+  name: "deepsurv"  # Start with simplest model
+  hidden_layers: [256, 128]
+  dropout: 0.3
+  activation: "relu"
+  batch_norm: true
+  
+# Training configuration  
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  num_epochs: 500
+  early_stopping:
+    patience: 50
+    min_delta: 0.0001
+    monitor: "val_c_index"  # Monitor validation C-index
+  optimizer: "adam"
+  weight_decay: 0.0001  # L2 regularization
+  
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "c_index"  # Concordance index
+    - "brier_score"
+    - "log_rank_p"
+  n_bootstrap: 100  # For confidence intervals
+  
+# Biomarker analysis configuration
+biomarker:
+  top_k_genes: [50, 100, 200, 500, 1000]  # Different cutoffs
+  stability_tiers:
+    tier1_cutoff: 100   # Top 100 in BOTH directions
+    tier2_cutoff: 500   # Top 500 in BOTH directions
+    tier3_cutoff: 1000  # Top 100 in one, Top 1000 in other
+    
+# Experiment configuration
+experiment:
+  directions:
+    - "tcga_to_orien"   # Train on TCGA, test on ORIEN
+    - "orien_to_tcga"   # Train on ORIEN, test on TCGA
+    - "combined"        # Train on combined, test on holdout
+  save_predictions: true
+  save_gene_rankings: true
+  
+# Logging configuration
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  tensorboard: true
+  wandb:
+    use_wandb: false  # Set to true if using Weights & Biases
+    project: "Expression-model"
+    
+# Compute configuration
+compute:
+  device: "cpu"  # or "cpu"
+  num_workers: 4  # For data loading
+  mixed_precision: false  # For faster training on compatible GPUs

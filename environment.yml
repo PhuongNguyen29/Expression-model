@@ -1,4 +1,4 @@
-name: biomarker-dl
+name: Expression-model
 channels:
   - pytorch
   - conda-forge
@@ -13,10 +13,11 @@ dependencies:
   - matplotlib
   - seaborn
   - jupyterlab
-  - lifelines  # For survival analysis
-  - shap       # For model interpretation
+  - lifelines # For survival analysis
+  - shap # For model interpretation
   - pip
   - pip:
-    - pycox     # Deep survival models
-    - scikit-survival
-    - captum    # PyTorch model interpretation
+      - pycox # Deep survival models
+      - scikit-survival
+      - captum
+      - -r requirements.txt # PyTorch model interpretation
