@@ -118,13 +118,13 @@ class DeepSurvHyperparameterTuner:
         - Our empirical experience with genomic data
         """
         if self.n_samples < 500:  # TCGA
-            first_layer_options = [64, 128, 256]
+            first_layer_options = [128, 256]
             max_layers = 2
-            dropout_min, dropout_max = 0.3, 0.5  # Heavy dropout
+            dropout_min, dropout_max = 0.2,0.3  
         elif self.n_samples < 1200:  # ORIEN  
             first_layer_options = [128, 256, 512]
             max_layers = 3
-            dropout_min, dropout_max = 0.3, 0.6  # Moderate dropout
+            dropout_min, dropout_max = 0.3, 0.5  # Moderate dropout
         else:  # Combined
             first_layer_options = [256, 512, 1024]
             max_layers = 3
