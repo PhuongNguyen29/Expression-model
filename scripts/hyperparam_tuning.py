@@ -125,11 +125,11 @@ class DeepSurvHyperparameterTuner:
             n_layers = trial.suggest_int('n_layers', 1, 2)
             
             if n_layers == 1:
-                hidden_sizes = [trial.suggest_categorical('layer_0', [128, 256])]
+                hidden_sizes = [trial.suggest_categorical('single_layer_size', [128, 256])]
             else:
                 # Two-layer: only safe combinations
-                first = trial.suggest_categorical('layer_0', [256, 384])  # Not 512
-                second = trial.suggest_categorical('layer_1', [64, 128])
+                first = trial.suggest_categorical('first_layer_size', [256, 384])  # Not 512
+                second = trial.suggest_categorical('second_layer_size', [64, 128])
                 hidden_sizes = [first, second]
             
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
@@ -375,12 +375,12 @@ def train_final_model_on_full_cohort(
     n_layers = best_params['n_layers']
     
     # Handle different parameter naming based on architecture
-    if 'layer_0' in best_params:
-        # TCGA style: individual layer parameters
-        for i in range(n_layers):
-            layer_key = f'layer_{i}'
-            if layer_key in best_params:
-                hidden_sizes.append(best_params[layer_key])
+    if 'single_layer_size' in best_params:
+        # TCGA 1-layer style
+        hidden_sizes = [best_params['single_layer_size']]
+    elif 'first_layer_size' in best_params:
+        # TCGA 2-layer style
+        hidden_sizes = [best_params['first_layer_size'], best_params['second_layer_size']]
     elif 'pattern_2' in best_params:
         # ORIEN style: pattern for 2 layers
         hidden_sizes = [int(x) for x in best_params['pattern_2'].split('-')]
