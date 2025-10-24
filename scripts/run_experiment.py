@@ -130,7 +130,7 @@ def run_bidirectional_experiments(config, data):
     Three experiments:
     1. Train on TCGA → Test on ORIEN
     2. Train on ORIEN → Test on TCGA  
-    3. Train on Combined → Test on both
+
     """
     
     # Get experiment config
@@ -161,7 +161,7 @@ def run_bidirectional_experiments(config, data):
         yaml.dump(config, f, default_flow_style=False)
     
     results = {}
-    directions = eval_config.get('directions', ['tcga_to_orien', 'orien_to_tcga', 'combined'])
+    directions = eval_config.get('directions', ['tcga_to_orien', 'orien_to_tcga'])
     
     # Determine device
     device_config = config.get('compute', {}).get('device', 'auto')
@@ -277,81 +277,7 @@ def run_bidirectional_experiments(config, data):
         # Save model
         torch.save(orien_model.state_dict(), output_dir / "orien_model.pth")
     
-    # ============================================================
-    # Experiment 3: Combined Training
-    # ============================================================
-    if 'combined' in directions:
-        logger.info("="*60)
-        logger.info("EXPERIMENT 3: COMBINED TRAINING")
-        logger.info("="*60)
-        
-        # Create combined dataset
-        combined_dataset = CombinedSurvivalDataset(
-            tcga_expr, surv_tcga, orien_expr, surv_orien
-        )
-        
-        # Split
-        n_samples = len(combined_dataset)
-        n_valid = int(n_samples * training_config.get('valid_split', 0.2))
-        n_train = n_samples - n_valid
-        
-        seed = config['experiment'].get('seed', 42)
-        train_dataset, valid_dataset = torch.utils.data.random_split(
-            combined_dataset, [n_train, n_valid],
-            generator=torch.Generator().manual_seed(seed)
-        )
-        
-        combined_train_loader = DataLoader(
-            train_dataset,
-            batch_size=training_config['batch_size'],
-            shuffle=True
-        )
-        combined_valid_loader = DataLoader(
-            valid_dataset,
-            batch_size=training_config['batch_size'],
-            shuffle=False
-        )
-        
-        # Create test loaders for both cohorts
-        tcga_test_loader = DataLoader(
-            SurvivalDataset(tcga_expr, surv_tcga),
-            batch_size=training_config['batch_size'],
-            shuffle=False
-        )
-        orien_test_loader = DataLoader(
-            SurvivalDataset(orien_expr, surv_orien),
-            batch_size=training_config['batch_size'],
-            shuffle=False
-        )
-        
-        # Create model and trainer
-        combined_model, combined_trainer = create_model_from_config(config, n_features)
-        
-        # Train
-        logger.info("Training on combined data...")
-        combined_history = combined_trainer.fit(
-            train_loader=combined_train_loader,
-            valid_loader=combined_valid_loader,
-            n_epochs=training_config['num_epochs'],
-            early_stopping_patience=training_config['early_stopping_patience'],
-            verbose=True
-        )
-        
-        # Evaluate on both cohorts
-        combined_tcga_results = evaluate_model(combined_model, tcga_test_loader, "TCGA_combined", device)
-        combined_orien_results = evaluate_model(combined_model, orien_test_loader, "ORIEN_combined", device)
-        
-        logger.info(f"Combined → TCGA C-index: {combined_tcga_results['c_index']:.4f}")
-        logger.info(f"Combined → ORIEN C-index: {combined_orien_results['c_index']:.4f}")
-        
-        results['combined'] = {
-            'training_history': combined_history,
-            'tcga_performance': combined_tcga_results,
-            'orien_performance': combined_orien_results
-        }
-        
-        # Save model
-        torch.save(combined_model.state_dict(), output_dir / "combined_model.pth")
+    
     
     # ============================================================
     # Generate Summary
@@ -373,11 +299,6 @@ def run_bidirectional_experiments(config, data):
             'Transfer (TCGA)': results['orien_to_tcga']['transfer_performance']['c_index']
         }
     
-    if 'combined' in results:
-        summary['Combined Training'] = {
-            'TCGA': results['combined']['tcga_performance']['c_index'],
-            'ORIEN': results['combined']['orien_performance']['c_index']
-        }
     
     # Print summary
     print("\n" + "="*60)
