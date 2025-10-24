@@ -1,0 +1,55 @@
+# Experiment: DeepSurv with Biomarker Genes
+# Uses pre-selected clinically relevant biomarker genes
+
+experiment:
+  name: "deepsurv_biomarker"
+  description: "DeepSurv with curated biomarker genes"
+  dataset_type: "biomarker"
+  model_type: "deepsurv"
+  seed: 42
+
+# Dataset configuration
+dataset:
+  name: "biomarker"
+  tcga_expression: "tcga_biomaker_genes.csv"
+  orien_expression: "orien_biomaker_genes.csv"
+  tcga_survival: "surv_tcga.csv"
+  orien_survival: "surv_orien_update.csv"
+  use_common_genes: true
+  min_variance_percentile: 0  # Pre-selected genes
+  standardize: true
+
+# Model configuration
+model:
+  type: "deepsurv"
+  hidden_sizes: [128, 64]  # Small network for biomarker genes
+  dropout: 0.2
+  activation: "relu"
+  batch_norm: true
+  weight_init: "xavier_uniform"
+
+# Training configuration
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_epochs: 200
+  early_stopping_patience: 20
+  valid_split: 0.2
+
+# Evaluation
+evaluation:
+  metrics: ["c_index", "brier_score"]
+  directions: ["tcga_to_orien", "orien_to_tcga", "combined"]
+
+# Paths
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  results_dir: "results"
+  logs_dir: "logs"
+
+# Compute
+compute:
+  device: "auto"
+  num_workers: 2
