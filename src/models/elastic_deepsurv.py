@@ -5,6 +5,7 @@ import numpy as np
 from collections import OrderedDict
 from typing import List, Tuple, Dict, Optional
 import logging
+from lifelines.utils import concordance_index 
 
 from src.models.deepsurv import DeepSurv, CoxPHLoss
 from src.utils.regularization import elastic_net_penalty, get_feature_importance, count_zero_weights
@@ -235,7 +236,7 @@ class ElasticDeepSurvTrainer:
                 all_times.extend(times.cpu().numpy())
                 all_events.extend(events.cpu().numpy())
                 
-        from lifelines.utils import concordance_index 
+        
         try:
             c_index = concordance_index(all_times, -np.array(all_risks), all_events)
         except Exception as e:
