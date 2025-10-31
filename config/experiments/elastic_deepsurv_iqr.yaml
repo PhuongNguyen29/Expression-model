@@ -1,5 +1,5 @@
-# Experiment: ElasticDeepSurv with IQR Filtered Genes
-# Combines DeepSurv architecture with Elastic Net regularization for feature selection
+# Experiment: ElasticDeepSurv with IQR Filtered Genes (CPU version)
+# Optimized for CPU training on HPC
 
 experiment:
   name: "elastic_deepsurv_iqr_filtered"
@@ -16,32 +16,35 @@ dataset:
   tcga_survival: "surv_tcga.csv"
   orien_survival: "surv_orien_update.csv"
   use_common_genes: true
-  min_variance_percentile: 0  # Already filtered
+  min_variance_percentile: 0 # Already filtered
   standardize: true
 
 # Model configuration
 model:
   type: "elastic_deepsurv"
-  hidden_sizes: [256, 128]  # Moderate network for IQR-filtered genes
+  hidden_sizes: [256, 128] # Moderate network for IQR-filtered genes
   dropout: 0.3
   activation: "relu"
   batch_norm: true
-  weight_init: "kaiming_uniform"  # He initialization for ReLU
-  
+  weight_init: "kaiming_uniform" # He initialization for ReLU
+
   # Elastic Net regularization parameters
   # Based on: Zou & Hastie (2005), Simon et al. (2011)
-  l1_ratio: 0.7  # 70% L1 (sparsity), 30% L2 (stability)
-                 # Higher ratio → more feature selection
-  alpha: 0.01    # Overall regularization strength
-                 # Typical range: 0.001-0.1
-                 # Higher α → sparser models
+  l1_ratio:
+    0.7 # 70% L1 (sparsity), 30% L2 (stability)
+    # Higher ratio → more feature selection
+  alpha:
+    0.01 # Overall regularization strength
+    # Typical range: 0.001-0.1
+    # Higher α → sparser models
 
 # Training configuration
 training:
-  batch_size: 32
+  batch_size: 32 # Can increase on CPU since no GPU memory limit
   learning_rate: 0.001
-  weight_decay: 0.0  # IMPORTANT: Set to 0 when using elastic net
-                     # Elastic net handles regularization in loss function
+  weight_decay:
+    0.0 # IMPORTANT: Set to 0 when using elastic net
+    # Elastic net handles regularization in loss function
   num_epochs: 200
   early_stopping_patience: 20
   valid_split: 0.2
@@ -50,7 +53,7 @@ training:
 evaluation:
   metrics: ["c_index", "brier_score"]
   directions: ["tcga_to_orien", "orien_to_tcga"]
-  save_feature_importance: true  # Extract top genes by weight magnitude
+  save_feature_importance: true # Extract top genes by weight magnitude
 
 # Paths
 paths:
@@ -59,13 +62,14 @@ paths:
   results_dir: "results"
   logs_dir: "logs"
 
-# Compute
+# Compute - EXPLICIT CPU
 compute:
-  device: "auto"  # Will use GPU if available
-  num_workers: 2
+  device: "cpu" # Force CPU (important for HPC without GPU)
+  num_workers: 8 # Match SGE smp setting for parallel data loading
 
-# Notes:
-# - l1_ratio controls sparsity: 0.7-0.9 for aggressive feature selection
-# - alpha controls regularization strength: tune if needed
-# - weight_decay should be 0 to avoid double regularization
-# - Expected sparsity: 20-40% of weights near zero with these settings
+# Notes for CPU training:
+# - Training will be 3-5x slower than GPU but still reasonable (4-8 hours)
+# - With 8 CPU cores and batch_size=32, expect ~5-10 epochs/hour
+# - num_workers=8 enables parallel data loading
+# - Can increase batch_size to 64 on CPU if memory allows
+# - Expected total time: 4-8 hours for 200 epochs (with early stopping)
