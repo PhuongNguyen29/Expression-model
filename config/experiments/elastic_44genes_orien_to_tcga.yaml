@@ -35,5 +35,7 @@ training:
   early_stopping_patience: 30
 
 paths:
+  raw_data_dir: "data/raw" # <-- ADD THIS
   processed_data_dir: "data/processed"
   results_dir: "results"
+  logs_dir: "logs"
