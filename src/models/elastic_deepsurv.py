@@ -22,7 +22,7 @@ class ElasticDeepSurv(DeepSurv):
                  hidden_sizes: List[int] = [256, 128],
                  dropout: float = 0.3,
                  activation: str = 'relu',
-                 bacth_norm: bool = True,
+                 batch_norm: bool = True,
                  weight_init: str = 'kaiming_uniform',   
                  l1_ratio: float = 0.5,
                  alpha: float = 0.01):
