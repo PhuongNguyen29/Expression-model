@@ -64,7 +64,7 @@ paths:
 
 # Compute - EXPLICIT CPU
 compute:
-  device: "cpu" # Force CPU (important for HPC without GPU)
+  device: "auto" # Force CPU (important for HPC without GPU)
   num_workers: 8 # Match SGE smp setting for parallel data loading
 
 # Notes for CPU training:
