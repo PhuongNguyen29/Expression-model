@@ -1,6 +1,6 @@
 """
 Model Factory for Flexible Model Creation
-Supports multiple survival models: DeepSurv, ElasticDeepSurv, Cox-PASNet, CoxNet, etc.
+Supports multiple survival models: DeepSurv, Cox-PASNet, CoxNet, etc.
 Based on Factory Design Pattern (Gang of Four, 1994)
 """
 
@@ -11,7 +11,6 @@ import logging
 
 # Import your existing models
 from src.models.deepsurv import DeepSurv
-from src.models.elastic_deepsurv import ElasticDeepSurv, ElasticDeepSurvTrainer  # ← NEW
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +21,12 @@ class ModelFactory:
     
     Supported models:
     - deepsurv: Feed-forward neural network (Katzman et al., 2018)
-    - elastic_deepsurv: DeepSurv with Elastic Net regularization (NEW)
     - coxnet: Elastic net Cox model (future)
     - cox_pasnet: Pathway-guided model (future)
     - deephit: Competing risks model (future)
     """
     
-    SUPPORTED_MODELS = ['deepsurv', 'elastic_deepsurv', 'coxnet', 'cox_pasnet', 'deephit']  # ← MODIFIED
+    SUPPORTED_MODELS = ['deepsurv', 'coxnet', 'cox_pasnet', 'deephit']
     
     @staticmethod
     def create_model(model_type: str, n_features: int, config: Dict) -> nn.Module:
@@ -36,7 +34,7 @@ class ModelFactory:
         Create a survival model based on configuration.
         
         Args:
-            model_type: Type of model ('deepsurv', 'elastic_deepsurv', etc.)
+            model_type: Type of model ('deepsurv', 'coxnet', etc.)
             n_features: Number of input features
             config: Model configuration dict
             
@@ -53,8 +51,6 @@ class ModelFactory:
         
         if model_type == 'deepsurv':
             return ModelFactory._create_deepsurv(n_features, config)
-        elif model_type == 'elastic_deepsurv':  # ← NEW
-            return ModelFactory._create_elastic_deepsurv(n_features, config)
         elif model_type == 'coxnet':
             raise NotImplementedError("CoxNet not yet implemented")
         elif model_type == 'cox_pasnet':
@@ -79,44 +75,11 @@ class ModelFactory:
             dropout=model_config.get('dropout', 0.4),
             activation=model_config.get('activation', 'relu'),
             batch_norm=model_config.get('batch_norm', True),
-            weight_init=model_config.get('weight_init', 'kaiming_uniform')  # Changed from xavier
+            weight_init=model_config.get('weight_init', 'xavier_uniform')
         )
         
         logger.info(f"  DeepSurv created with {n_features} input features")
         logger.info(f"  Architecture: {model_config.get('hidden_sizes', [512, 256])}")
-        logger.info(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-        
-        return model
-    
-    @staticmethod
-    def _create_elastic_deepsurv(n_features: int, config: Dict) -> ElasticDeepSurv:
-        """
-        Create ElasticDeepSurv model with Elastic Net regularization.
-        
-        Based on:
-        - Katzman et al., 2018 (DeepSurv architecture)
-        - Zou & Hastie, 2005 (Elastic Net regularization)
-        """
-        model_config = config.get('model', {})
-        
-        # Get elastic net parameters (with defaults)
-        l1_ratio = model_config.get('l1_ratio', 0.7)
-        alpha = model_config.get('alpha', 0.01)
-        
-        model = ElasticDeepSurv(
-            n_features=n_features,
-            hidden_sizes=model_config.get('hidden_sizes', [256, 128]),
-            dropout=model_config.get('dropout', 0.3),
-            activation=model_config.get('activation', 'relu'),
-            batch_norm=model_config.get('batch_norm', True),
-            weight_init=model_config.get('weight_init', 'kaiming_uniform'),
-            l1_ratio=l1_ratio,
-            alpha=alpha
-        )
-        
-        logger.info(f"  ElasticDeepSurv created with {n_features} input features")
-        logger.info(f"  Architecture: {model_config.get('hidden_sizes', [256, 128])}")
-        logger.info(f"  Elastic Net: l1_ratio={l1_ratio}, alpha={alpha}")
         logger.info(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
         
         return model
@@ -176,22 +139,6 @@ class TrainerFactory:
             logger.info(f"  Weight decay: {training_config.get('weight_decay', 0.01)}")
             
             return trainer
-            
-        elif model_type == 'elastic_deepsurv':  # ← NEW
-            training_config = config.get('training', {})
-            
-            trainer = ElasticDeepSurvTrainer(
-                model=model,
-                learning_rate=training_config.get('learning_rate', 0.001),
-                weight_decay=training_config.get('weight_decay', 0.0),  # Use 0 for elastic net
-                device=device
-            )
-            
-            logger.info(f"  Trainer created for {model_type}")
-            logger.info(f"  Learning rate: {training_config.get('learning_rate', 0.001)}")
-            logger.info(f"  Weight decay: {training_config.get('weight_decay', 0.0)} (using elastic net instead)")
-            
-            return trainer
         else:
             raise NotImplementedError(f"Trainer for {model_type} not yet implemented")
 
@@ -237,44 +184,13 @@ if __name__ == "__main__":
     
     logging.basicConfig(level=logging.INFO)
     
-    # Test DeepSurv creation
-    print("="*60)
-    print("Testing DeepSurv creation")
-    print("="*60)
-    with open("config/experiments/deepsurv_iqr.yaml", 'r') as f:
+    # Load config
+    with open("config/experiments/deepsurv_full.yaml", 'r') as f:
         config = yaml.safe_load(f)
     
-    n_features = 100
+    # Create model
+    n_features = 14778  # Example
     model, trainer = create_model_from_config(config, n_features)
+    
     print(f"\nModel type: {config['model']['type']}")
-    print(f"Model: {type(model).__name__}")
-    print(f"Trainer: {type(trainer).__name__}")
-    
-    # Test ElasticDeepSurv creation
-    print("\n" + "="*60)
-    print("Testing ElasticDeepSurv creation")
-    print("="*60)
-    
-    elastic_config = {
-        'model': {
-            'type': 'elastic_deepsurv',
-            'hidden_sizes': [64, 32],
-            'dropout': 0.3,
-            'l1_ratio': 0.7,
-            'alpha': 0.01
-        },
-        'training': {
-            'learning_rate': 0.001,
-            'weight_decay': 0.0
-        },
-        'compute': {
-            'device': 'cpu'
-        }
-    }
-    
-    model, trainer = create_model_from_config(elastic_config, n_features)
-    print(f"\nModel type: {elastic_config['model']['type']}")
-    print(f"Model: {type(model).__name__}")
-    print(f"Trainer: {type(trainer).__name__}")
-    print(f"L1 ratio: {model.l1_ratio}")
-    print(f"Alpha: {model.alpha}")
+    print(f"Model: {model}")

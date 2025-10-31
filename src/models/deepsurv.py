@@ -32,7 +32,7 @@ class DeepSurv(nn.Module):
         dropout: float = 0.4,
         activation: str = 'relu',
         batch_norm: bool = True,
-        weight_init: str = 'xavier_uniform'
+        weight_init: str = 'kaiming_uniform'
     ):
         """
         Initialize DeepSurv model.

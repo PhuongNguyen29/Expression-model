@@ -1,0 +1,71 @@
+# Experiment: ElasticDeepSurv with IQR Filtered Genes
+# Combines DeepSurv architecture with Elastic Net regularization for feature selection
+
+experiment:
+  name: "elastic_deepsurv_iqr_filtered"
+  description: "ElasticDeepSurv with IQR-filtered genes (L1+L2 regularization for sparsity)"
+  dataset_type: "iqr_filtered"
+  model_type: "elastic_deepsurv"
+  seed: 42
+
+# Dataset configuration
+dataset:
+  name: "iqr_filtered"
+  tcga_expression: "tcga_iqr_filtered_30.csv"
+  orien_expression: "orien_iqr_filtered_30.csv"
+  tcga_survival: "surv_tcga.csv"
+  orien_survival: "surv_orien_update.csv"
+  use_common_genes: true
+  min_variance_percentile: 0  # Already filtered
+  standardize: true
+
+# Model configuration
+model:
+  type: "elastic_deepsurv"
+  hidden_sizes: [256, 128]  # Moderate network for IQR-filtered genes
+  dropout: 0.3
+  activation: "relu"
+  batch_norm: true
+  weight_init: "kaiming_uniform"  # He initialization for ReLU
+  
+  # Elastic Net regularization parameters
+  # Based on: Zou & Hastie (2005), Simon et al. (2011)
+  l1_ratio: 0.7  # 70% L1 (sparsity), 30% L2 (stability)
+                 # Higher ratio → more feature selection
+  alpha: 0.01    # Overall regularization strength
+                 # Typical range: 0.001-0.1
+                 # Higher α → sparser models
+
+# Training configuration
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0  # IMPORTANT: Set to 0 when using elastic net
+                     # Elastic net handles regularization in loss function
+  num_epochs: 200
+  early_stopping_patience: 20
+  valid_split: 0.2
+
+# Evaluation
+evaluation:
+  metrics: ["c_index", "brier_score"]
+  directions: ["tcga_to_orien", "orien_to_tcga"]
+  save_feature_importance: true  # Extract top genes by weight magnitude
+
+# Paths
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  results_dir: "results"
+  logs_dir: "logs"
+
+# Compute
+compute:
+  device: "auto"  # Will use GPU if available
+  num_workers: 2
+
+# Notes:
+# - l1_ratio controls sparsity: 0.7-0.9 for aggressive feature selection
+# - alpha controls regularization strength: tune if needed
+# - weight_decay should be 0 to avoid double regularization
+# - Expected sparsity: 20-40% of weights near zero with these settings
