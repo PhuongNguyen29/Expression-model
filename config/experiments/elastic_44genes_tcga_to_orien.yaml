@@ -4,7 +4,7 @@ experiment:
   direction: "tcga_to_orien"
 
 dataset:
-  name: "tcga_to_orien_44genes"
+  name: "biomarker"
   tcga_expression: "tcga_44genes.csv"
   orien_expression: "orien_44genes.csv"
   tcga_survival: "surv_tcga.csv"
