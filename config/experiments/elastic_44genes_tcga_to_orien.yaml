@@ -1,0 +1,38 @@
+experiment:
+  name: "elastic_44genes_tcga_to_orien"
+  description: "Train on TCGA (44 genes) with TCGA-optimized hyperparameters"
+  direction: "tcga_to_orien"
+
+dataset:
+  tcga_expression: "tcga_44genes.csv"
+  orien_expression: "orien_44genes.csv"
+  tcga_survival: "surv_tcga.csv"
+  orien_survival: "surv_orien_update.csv"
+  source_cohort: "tcga"
+  target_cohort: "orien"
+
+model:
+  type: "elastic_deepsurv"
+
+  # Architecture from TCGA tuning
+  hidden_sizes: [384, 64]
+  dropout: 0.3
+  activation: "elu"
+  batch_norm: true
+  weight_init: "kaiming_uniform"
+
+  # Regularization from TCGA tuning
+  alpha: 0.007667140621769463
+  l1_ratio: 0.9
+
+training:
+  # Training params from TCGA tuning
+  batch_size: 32
+  learning_rate: 0.0002695324802380015
+  weight_decay: 0.0
+  num_epochs: 200
+  early_stopping_patience: 30
+
+paths:
+  processed_data_dir: "data/processed"
+  results_dir: "results"
