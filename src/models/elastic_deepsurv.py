@@ -173,10 +173,10 @@ class ElasticDeepSurvTrainer:
             times = batch['time'].to(self.device)
             events = batch['event'].to(self.device)
             
-            # Check for events in batch (should never happen with StratifiedBatchSampler)
-            if events.sum() == 0:
-                logger.warning(f"Batch {batch_idx} has no events! Skipping.")
-                continue
+            # # Check for events in batch (should never happen with StratifiedBatchSampler)
+            # if events.sum() == 0:
+            #     logger.warning(f"Batch {batch_idx} has no events! Skipping.")
+            #     continue
             
             self.optimizer.zero_grad()
             # Forward pass
