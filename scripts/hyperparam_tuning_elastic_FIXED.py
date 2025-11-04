@@ -435,6 +435,14 @@ def run_leakage_free_tuning(
         surv = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
     
     logger.info(f"Loaded: {expr_raw.shape[0]} genes × {expr_raw.shape[1]} samples")
+    if config['data'].get('use_consensus_genes', False):
+        consensus_file = config['data'].get('consensus_gene_file', 'data/raw/consensus_genes_308.txt')
+        logger.info(f"Loading consensus genes from: {consensus_file}")
+        with open(consensus_file, 'r') as f:
+            consensus_genes = [line.strip() for line in f if line.strip()]
+        available_genes = [g for g in consensus_genes if g in expr_raw.index]
+        expr_raw = expr_raw.loc[available_genes]
+        logger.info(f"After consensus filter: {len(expr_raw)} genes × {expr_raw.shape[1]} samples")
     
     # Create tuner
     tuner = LeakageFreeHyperparameterTuner(
