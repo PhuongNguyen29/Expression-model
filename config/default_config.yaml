@@ -24,7 +24,7 @@ data:
   log_transform: false # Data already log-transformed
   standardize: true # Z-score standardization per cohort
 
-  use_consensus_genes: false
+  use_consensus_genes: true
   consensus_gene_file: "data/raw/consensus_genes_308.txt"
 
   # Train/test split
