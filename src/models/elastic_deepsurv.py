@@ -379,9 +379,9 @@ class ElasticDeepSurvTrainer:
                     f"Sparsity: {sparsity_ratio:.1%}"
                 )
         
-            if patience_counter >= early_stopping_patience:
-                logger.info(f"Early stopping at epoch {epoch+1}.")
-                break
+                if patience_counter >= early_stopping_patience:
+                    logger.info(f"Early stopping at epoch {epoch+1}.")
+                    break
             
         #Restore best model
         if best_model_state is not None:
