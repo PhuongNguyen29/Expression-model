@@ -88,3 +88,6 @@ compute:
   device: "cpu" # or "cpu"
   num_workers: 4 # For data loading
   mixed_precision: false # For faster training on compatible GPUs
+
+use_consensus_genes: false
+consensus_gene_file: "data/raw/consensus_genes_308.txt"
