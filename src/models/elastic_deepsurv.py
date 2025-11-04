@@ -332,6 +332,8 @@ class ElasticDeepSurvTrainer:
         logger.info("Starting training...")
         logger.info(f"Max epochs: {n_epochs}, Early stopping patience: {early_stopping_patience}")
         
+        _, _, _, train_cindex = self.evaluate(train_loader)
+        
         for epoch in range(n_epochs):
             train_total, train_cox, train_penalty = self.train_epoch(train_loader)
             if valid_loader is not None:
@@ -344,8 +346,6 @@ class ElasticDeepSurvTrainer:
                 self.history['valid_loss'].append(None)
                 self.history['valid_c_index'].append(None)
                         
-            _, _, _, train_cindex = self.evaluate(train_loader)
-            
             sparsity_info = self.model.get_sparsity_info()
             sparsity_ratio = sparsity_info['sparsity_ratio']
             

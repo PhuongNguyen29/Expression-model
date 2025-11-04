@@ -180,13 +180,17 @@ def train_model_on_cohort(
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Training on: {device}")
     
+    adjusted_lr = best_params.get('learning_rate', 1e-4) * 0.5
+
     trainer = ElasticDeepSurvTrainer(
         model=model,
-        learning_rate=best_params.get('learning_rate', 1e-4),
+        learning_rate=adjusted_lr,
         weight_decay=0.0,
         device=device
     )
-    
+
+    logger.info(f"Adjusted learning rate: {adjusted_lr:.6f} (50% of original for 308 genes)")
+        
     logger.info(f"Training for {n_epochs} epochs...")
     
     # FIXED: Pass valid_loader=None explicitly and handle in trainer
