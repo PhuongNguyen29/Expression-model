@@ -203,7 +203,8 @@ def train_model_on_cohort(
     )
     
     logger.info(f"Training complete!")
-    logger.info(f"Final train loss: {history['train_loss'][-1]:.4f}")
+    logger.info(f"Final Cox loss: {history['cox_loss'][-1]:.4f}")
+    logger.info(f"Final train C-index: {history['train_cindex'][-1]:.4f}")
     
     # Extract feature importance
     logger.info("Computing feature importance (L2 norm)...")
