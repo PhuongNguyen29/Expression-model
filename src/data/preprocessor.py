@@ -237,3 +237,101 @@ class GeneExpressionPreprocessor:
         self.scaler_orien = state['scaler_orien']
         self.config = state['config']
         logger.info(f"Preprocessor loaded from {path}")
+        
+    def fit_transform_single_cohort(self, 
+                                expr_data: pd.DataFrame,
+                                cohort_name: str = 'cohort') -> pd.DataFrame:
+        """
+        Fit preprocessor and transform a SINGLE cohort (for CV fold training set).
+        
+        CRITICAL: Use this inside CV loops to prevent data leakage.
+        
+        Args:
+            expr_data: Gene expression DataFrame (genes × samples)
+            cohort_name: Name for logging (e.g., 'TCGA', 'ORIEN')
+            
+        Returns:
+            Preprocessed DataFrame (genes × samples)
+            
+        Example:
+            # Inside CV loop
+            train_fold = raw_data[:, train_indices]
+            preprocessor = GeneExpressionPreprocessor(config)
+            train_processed = preprocessor.fit_transform_single_cohort(train_fold)
+            test_processed = preprocessor.transform_single_cohort(test_fold)
+        """
+        logger.info(f"Preprocessing {cohort_name} (single cohort mode)")
+        logger.info(f"  Input shape: {expr_data.shape} (genes × samples)")
+        
+        # Step 1: Variance filtering on this cohort only
+        gene_var = self.compute_gene_variance(expr_data)
+        threshold = np.percentile(gene_var, self.min_variance_percentile)
+        selected_genes = gene_var[gene_var > threshold].index.tolist()
+        
+        self.selected_genes = selected_genes
+        self.gene_variances = gene_var
+        
+        filtered = expr_data.loc[selected_genes]
+        logger.info(f"  After variance filter: {len(selected_genes)} genes "
+                    f"({100*len(selected_genes)/len(expr_data):.1f}% retained)")
+        
+        # Step 2: Standardization (z-score)
+        if self.standardize:
+            scaler = StandardScaler()
+            # Transpose: samples as rows for sklearn
+            scaled_T = scaler.fit_transform(filtered.T)
+            self.scaler = scaler  # Store fitted scaler
+            
+            # Transpose back: genes as rows
+            result = pd.DataFrame(
+                scaled_T.T,
+                index=filtered.index,
+                columns=filtered.columns
+            )
+            
+            logger.info(f"  Standardized: mean={result.mean().mean():.4f}, "
+                    f"std={result.std().mean():.4f}")
+        else:
+            result = filtered
+        
+        return result
+
+
+    def transform_single_cohort(self, expr_data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Transform test data using fitted parameters from training fold.
+        
+        CRITICAL: Only call this AFTER fit_transform_single_cohort().
+        
+        Args:
+            expr_data: Gene expression DataFrame (genes × samples)
+            
+        Returns:
+            Preprocessed DataFrame using training fold parameters
+            
+        Raises:
+            ValueError: If preprocessor not fitted
+        """
+        if self.selected_genes is None:
+            raise ValueError(
+                "Preprocessor not fitted. Call fit_transform_single_cohort() first."
+            )
+        
+        # Apply same gene selection as training fold
+        filtered = expr_data.loc[self.selected_genes]
+        
+        # Apply standardization with fitted scaler
+        if self.standardize:
+            if self.scaler is None:
+                raise ValueError("Scaler not fitted. Call fit_transform_single_cohort() first.")
+            
+            scaled_T = self.scaler.transform(filtered.T)
+            result = pd.DataFrame(
+                scaled_T.T,
+                index=filtered.index,
+                columns=filtered.columns
+            )
+        else:
+            result = filtered
+        
+        return result
