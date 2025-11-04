@@ -30,6 +30,7 @@ from src.utils.feature_selection import (
     get_selected_gene_names
 )
 from lifelines.utils import concordance_index
+from src.utils.batch_samplers import StratifiedBatchSampler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,9 +85,29 @@ def evaluate_single_direction(
     test_dataset = SurvivalDataset(test_processed, test_surv)
     
     # Create data loaders
-    batch_size = best_params.get('batch_size', 32)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    batch_size = best_params.get('batch_size', 64)
+    train_batch_sampler = StratifiedBatchSampler(
+        events=train_surv['event'].values,
+        batch_size=batch_size,
+        min_events_per_batch=1,
+        shuffle=True,
+        drop_last=False
+    )
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=train_batch_sampler
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False
+    )
+    
+    logger.info(f"Training batches: {len(train_loader)}")
+    logger.info(f"Test batches: {len(test_loader)}")
     
     # Build model with best hyperparameters
     n_features = train_processed.shape[0]

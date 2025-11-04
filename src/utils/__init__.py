@@ -1,14 +1,16 @@
-"""
-Utility functions for Expression-model project
-"""
+"""Utility functions for survival analysis."""
 
-from .regularization import (
+from src.utils.regularization import (
     l1_penalty,
     l2_penalty,
     elastic_net_penalty,
     get_feature_importance,
-    count_zero_weights,
-    get_regularization_path
+    count_zero_weights
+)
+
+from src.utils.batch_samplers import (
+    StratifiedBatchSampler,
+    AdaptiveStratifiedBatchSampler
 )
 
 __all__ = [
@@ -17,5 +19,6 @@ __all__ = [
     'elastic_net_penalty',
     'get_feature_importance',
     'count_zero_weights',
-    'get_regularization_path'   
+    'StratifiedBatchSampler',
+    'AdaptiveStratifiedBatchSampler'
 ]

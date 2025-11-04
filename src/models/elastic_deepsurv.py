@@ -165,40 +165,95 @@ class ElasticDeepSurvTrainer:
         penalty_sum = 0.0
         n_batches = 0
         
-        for batch in train_loader:
+        n_params = sum(p.numel() for p in self.model.parameters())
+        expected_norm = np.sqrt(n_params) * 0.01  # Baseline expectation
+        
+        for batch_idx, batch in enumerate(train_loader):
             features = batch['features'].to(self.device)
             times = batch['time'].to(self.device)
             events = batch['event'].to(self.device)
             
+            # Check for events in batch (should never happen with StratifiedBatchSampler)
+            if events.sum() == 0:
+                logger.warning(f"Batch {batch_idx} has no events! Skipping.")
+                continue
+            
             self.optimizer.zero_grad()
+            # Forward pass
             log_hazards = self.model(features)
             total_loss, cox_loss, penalty = self.model.compute_loss(
-                log_hazards, times, events, return_components=True)
+                log_hazards, times, events, return_components=True
+            )
+            # Backward pass
             total_loss.backward()
             total_norm = 0.0
-            
+            has_nan = False
+        
             for p in self.model.parameters():
                 if p.grad is not None:
+                    # Check for NaN
                     if torch.isnan(p.grad).any():
-                        raise RuntimeError("NaN detected in gradients. Check model and data for issues.")
+                        has_nan = True
+                        break
                     param_norm = p.grad.data.norm(2)
                     total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** (0.5)
-            if total_norm > 100.0:
-                logger.error(f"Exploding gradients detected (norm={total_norm:.2f}). Consider reducing learning rate or adding gradient clipping.")
-                return float('inf'), float('inf'), float('inf')
-                
-            if total_norm > 10.0:
-                logger.warning(f"Large gradients detected (norm={total_norm:.2f}).")
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
-                
-                total_loss_sum += total_loss.item()
-                cox_loss_sum += cox_loss.item()
-                penalty_sum += penalty.item()
-                n_batches += 1
             
-        return (total_loss_sum/n_batches, cox_loss_sum/n_batches, penalty_sum/n_batches)
+            total_norm = total_norm ** 0.5
+            
+            if has_nan:
+                logger.error("NaN detected in gradients. Skipping batch.")
+                self.optimizer.zero_grad()
+                continue
+            
+            # Adaptive thresholds based on parameter count
+            warn_threshold = 2.0 * expected_norm  # 2× expected
+            clip_threshold = 3.0 * expected_norm  # 3× expected
+            explode_threshold = 5.0 * expected_norm  # 5× expected
+            
+            # Handle gradient magnitude
+            if total_norm > explode_threshold:
+                logger.error(
+                    f"Exploding gradients detected (norm={total_norm:.2f}, "
+                    f"expected~{expected_norm:.2f}). Skipping batch."
+                )
+                self.optimizer.zero_grad()
+                continue
+                
+            elif total_norm > clip_threshold:
+                logger.warning(
+                    f"Large gradients detected (norm={total_norm:.2f}). "
+                    f"Clipping to {clip_threshold:.2f}."
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=clip_threshold
+                )
+            
+            elif total_norm > warn_threshold:
+                # Log but don't clip (moderate gradient)
+                logger.debug(
+                    f"Moderate gradient norm: {total_norm:.2f} "
+                    f"(expected~{expected_norm:.2f})"
+                )
+            
+            # Update parameters
+            self.optimizer.step()
+            
+            # Accumulate losses
+            total_loss_sum += total_loss.item()
+            cox_loss_sum += cox_loss.item()
+            penalty_sum += penalty.item()
+            n_batches += 1
+        
+        if n_batches == 0:
+            logger.error("No successful batches in epoch!")
+            return float('inf'), float('inf'), float('inf')
+        
+        return (
+            total_loss_sum / n_batches,
+            cox_loss_sum / n_batches,
+            penalty_sum / n_batches
+        )
     
     def evaluate(self, data_loader) -> Tuple[float, float, float, float]:
         """

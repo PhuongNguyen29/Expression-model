@@ -27,6 +27,7 @@ from src.data.preprocessor import GeneExpressionPreprocessor
 from src.data.dataset import SurvivalDataset
 from torch.utils.data import DataLoader
 from src.models.elastic_deepsurv import ElasticDeepSurv, ElasticDeepSurvTrainer
+from src.utils.batch_samplers import StratifiedBatchSampler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -148,21 +149,15 @@ class LeakageFreeHyperparameterTuner:
         torch.backends.cudnn.benchmark = False
     
     def preprocess_fold(
-        self,
-        train_indices: np.ndarray,
-        val_indices: np.ndarray
+    self,
+    train_indices: np.ndarray,
+    val_indices: np.ndarray
     ):
         """
         Preprocess one CV fold with proper train/test separation.
         
-        CRITICAL: This is where we prevent data leakage.
-        
-        Args:
-            train_indices: Sample indices for training
-            val_indices: Sample indices for validation
-            
         Returns:
-            train_dataset, val_dataset, n_features
+            train_dataset, val_dataset, n_features, train_events
         """
         # Get sample names for this fold
         train_samples = self.train_expr_raw.columns[train_indices]
@@ -194,7 +189,10 @@ class LeakageFreeHyperparameterTuner:
         
         n_features = train_processed.shape[0]
         
-        return train_dataset, val_dataset, n_features
+        # Return events for stratified batch sampling
+        train_events = train_surv_fold['event'].values
+        
+        return train_dataset, val_dataset, n_features, train_events
     
     def objective(self, trial: optuna.Trial) -> float:
         """
@@ -247,15 +245,14 @@ class LeakageFreeHyperparameterTuner:
         l1_ratio = trial.suggest_categorical('l1_ratio', [0.5, 0.7, 0.9])
         learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
         
-        # Cross-validation loop
         skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
         cv_scores = []
         
         for fold, (train_idx, val_idx) in enumerate(skf.split(
-        range(self.n_samples),
-        self.strat_bins  # Use enhanced stratification (event + time)
-    )):
-            # Log fold statistics for verification
+            range(self.n_samples),
+            self.strat_bins
+        )):
+            # Log fold statistics
             train_event_rate = self.events[train_idx].mean()
             val_event_rate = self.events[val_idx].mean()
             train_median_time = np.median(self.times[train_idx])
@@ -269,24 +266,40 @@ class LeakageFreeHyperparameterTuner:
                     f"{val_event_rate:.1%} events, "
                     f"median time = {val_median_time:.0f}")
             
-            # CRITICAL: Preprocess this fold independently (prevents data leakage)
-            train_dataset, val_dataset, n_features = self.preprocess_fold(
+            # CRITICAL: Preprocess this fold independently
+            train_dataset, val_dataset, n_features, train_events = self.preprocess_fold(
                 train_idx, val_idx
             )
             
             logger.info(f"    Features after preprocessing: {n_features}")
             
+            # ============================================================
+            # CREATE STRATIFIED BATCH SAMPLER (NEW - CRITICAL FIX)
+            # ============================================================
+            
+            train_batch_sampler = StratifiedBatchSampler(
+                events=train_events,
+                batch_size=batch_size,
+                min_events_per_batch=1,  # Guarantee at least 1 event per batch
+                shuffle=True,
+                drop_last=False
+            )
+            
             # Create data loaders
             train_loader = DataLoader(
                 train_dataset,
-                batch_size=batch_size,
-                shuffle=True
+                batch_sampler=train_batch_sampler  # Use custom sampler
             )
+            
+            # Validation doesn't need stratified sampling (no gradient computation)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=batch_size,
                 shuffle=False
             )
+            
+            logger.info(f"    Train batches: {len(train_loader)}")
+            logger.info(f"    Val batches: {len(val_loader)}")
             
             # Create model for this fold
             model = ElasticDeepSurv(
@@ -304,7 +317,7 @@ class LeakageFreeHyperparameterTuner:
             trainer = ElasticDeepSurvTrainer(
                 model=model,
                 learning_rate=learning_rate,
-                weight_decay=0.0,  # Use elastic net instead of weight decay
+                weight_decay=0.0,
                 device=self.device
             )
             
@@ -325,13 +338,11 @@ class LeakageFreeHyperparameterTuner:
                 
             except Exception as e:
                 logger.warning(f"    Fold {fold+1} failed: {e}")
-                cv_scores.append(0.5)  # Worst case baseline
+                cv_scores.append(0.5)
                 continue
             
-            # Report intermediate value for pruning
+            # Report for pruning
             trial.report(np.mean(cv_scores), fold)
-            
-            # Prune unpromising trials early
             if trial.should_prune():
                 logger.info(f"  Trial pruned at fold {fold+1}")
                 raise optuna.TrialPruned()
@@ -340,9 +351,6 @@ class LeakageFreeHyperparameterTuner:
         std_cindex = np.std(cv_scores)
         
         logger.info(f"\nTrial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
-        logger.info(f"  Architecture: {hidden_sizes}")
-        logger.info(f"  Alpha: {alpha:.4e}, L1 ratio: {l1_ratio:.2f}")
-        logger.info(f"  Learning rate: {learning_rate:.4e}")
         
         return mean_cindex
     
