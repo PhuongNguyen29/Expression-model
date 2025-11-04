@@ -205,16 +205,16 @@ class LeakageFreeHyperparameterTuner:
         if self.n_samples < 500:  # TCGA
             n_layers = trial.suggest_int('n_layers', 1, 2)
             if n_layers == 1:
-                layer1_size = trial.suggest_categorical('layer1_size', [128, 256, 384])
+                layer1_size = trial.suggest_categorical('layer1_size', [64, 128, 256])
                 hidden_sizes = [layer1_size]
             else:  # n_layers == 2
             # Two layers: use predefined patterns to avoid Optuna conflicts
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['256-64',   # 3.80M params - narrow funnel
-                    '256-128',  # 3.82M params - wider second layer
-                    '384-64',   # 5.68M params - aggressive funnel
-                    '384-128']) # 5.72M params - moderate funnel
+                    ['256-64',   # 308→256→64: 79K params
+                    '256-128',  # 308→256→128: 113K params
+                    '128-64',   # 308→128→64: 47K params - conservative
+                    '128-32']) # 5.72M params - moderate funnel
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
             batch_size = trial.suggest_categorical('batch_size', [32, 48])
@@ -223,16 +223,17 @@ class LeakageFreeHyperparameterTuner:
             if n_layers == 2:
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['512-128',  # 7.60M params
-                    '384-96',   # 5.68M params
-                    '256-64'])  # 3.80M params
+                    ['256-128',  # 308→256→128: 113K params
+                    '256-64',   # 308→256→64: 79K params
+                    '128-64',   # 308→128→64: 47K params
+                    '192-96'])
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             else:
                 architecture = trial.suggest_categorical(
                 'architecture_3layer',
-                ['512-256-64',   # 7.66M params - gradual funnel
-                '384-192-48',   # 5.69M params - proportional reduction
-                '256-128-32'])  # 3.82M params - conservative
+                ['256-128-32',   # 308→256→128→32: 117K params
+                 '192-96-32',    # 308→192→96→32: 78K params
+                 '128-64-32'])   # 308→128→64→32: 47K params
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
