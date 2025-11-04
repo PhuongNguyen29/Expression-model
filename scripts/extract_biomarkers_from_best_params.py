@@ -116,9 +116,13 @@ def train_model_on_cohort(
     logger.info(f"Expression matrix after consensus filtering: {expr_filtered.shape}")
     
     # Standardize (per-gene z-score)
-    expr_standardized = (expr_filtered - expr_filtered.mean(axis=1, keepdims=True)) / (
-        expr_filtered.std(axis=1, keepdims=True) + 1e-8
-    )
+    expr_mean = expr_filtered.mean(axis=1).values.reshape(-1, 1)
+    expr_std = expr_filtered.std(axis=1).values.reshape(-1, 1)
+    expr_standardized = pd.DataFrame(
+        (expr_filtered.values - expr_mean) / (expr_std + 1e-8),
+        index=expr_filtered.index,
+        columns=expr_filtered.columns
+)
     
     logger.info(f"Standardized: mean={expr_standardized.values.mean():.4f}, std={expr_standardized.values.std():.4f}")
     
