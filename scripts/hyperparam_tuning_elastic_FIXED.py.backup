@@ -435,37 +435,16 @@ def run_leakage_free_tuning(
         surv = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
     
     logger.info(f"Loaded: {expr_raw.shape[0]} genes × {expr_raw.shape[1]} samples")
-    
-    # ========================================================================
-    # CONSENSUS GENE FILTERING (Chapter 3)
-    # ========================================================================
     if config['data'].get('use_consensus_genes', False):
         consensus_file = config['data'].get('consensus_gene_file', 'data/raw/consensus_genes_308.txt')
-        logger.info("="*50)
-        logger.info(f"CONSENSUS GENE MODE ENABLED")
         logger.info(f"Loading consensus genes from: {consensus_file}")
-        
-        try:
-            with open(consensus_file, 'r') as f:
-                consensus_genes = [line.strip() for line in f if line.strip()]
-            
-            logger.info(f"  Consensus gene list: {len(consensus_genes)} genes")
-            available_genes = [g for g in consensus_genes if g in expr_raw.index]
-            missing_genes = set(consensus_genes) - set(available_genes)
-            
-            if missing_genes:
-                logger.warning(f"  Missing {len(missing_genes)} genes from consensus list")
-            
-            expr_raw = expr_raw.loc[available_genes]
-            logger.info(f"  After consensus filter: {len(expr_raw)} genes × {expr_raw.shape[1]} samples")
-            logger.info(f"  ✓ Using Chapter 2's consensus genes for fair comparison")
-            logger.info("="*50)
-        except FileNotFoundError:
-            logger.error(f"Consensus gene file not found: {consensus_file}")
-            logger.error("Falling back to all genes")
-    else:
-        logger.info("Using all genes (use_consensus_genes=False in config)")
-    # ========================================================================
+        with open(consensus_file, 'r') as f:
+            consensus_genes = [line.strip() for line in f if line.strip()]
+        available_genes = [g for g in consensus_genes if g in expr_raw.index]
+        expr_raw = expr_raw.loc[available_genes]
+        logger.info(f"After consensus filter: {len(expr_raw)} genes × {expr_raw.shape[1]} samples")
+    
+    # Create tuner
     tuner = LeakageFreeHyperparameterTuner(
         train_expr_raw=expr_raw,
         train_surv=surv,
