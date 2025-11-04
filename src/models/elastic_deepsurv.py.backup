@@ -334,24 +334,16 @@ class ElasticDeepSurvTrainer:
         
         for epoch in range(n_epochs):
             train_total, train_cox, train_penalty = self.train_epoch(train_loader)
-            if valid_loader is not None:
-                valid_total, valid_cox, valid_penalty, valid_cindex = self.evaluate(valid_loader)
-                self.history['valid_loss'].append(valid_total)
-                self.history['valid_c_index'].append(valid_cindex)
-            else:
-                # No validation
-                valid_cindex = train_cindex
-                self.history['valid_loss'].append(None)
-                self.history['valid_c_index'].append(None)
-                        
+            valid_total, valid_cox, valid_penalty, valid_cindex = self.evaluate(valid_loader)
+            
             _, _, _, train_cindex = self.evaluate(train_loader)
             
             sparsity_info = self.model.get_sparsity_info()
             sparsity_ratio = sparsity_info['sparsity_ratio']
             
             #store history
-            # self.history['train_loss'].append(train_total)
-            # self.history['valid_loss'].append(valid_total)
+            self.history['train_loss'].append(train_total)
+            self.history['valid_loss'].append(valid_total)
             self.history['train_cindex'].append(train_cindex)
             self.history['valid_c_index'].append(valid_cindex)
             self.history['cox_loss'].append(train_cox)
@@ -361,13 +353,12 @@ class ElasticDeepSurvTrainer:
             self.scheduler.step(valid_cindex)
             
             #early stoping
-            if early_stopping_patience is not None and valid_loader is not None:
-                if valid_cindex > best_cindex:
-                    best_cindex = valid_cindex
-                    best_model_state = self.model.state_dict().copy()
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+            if valid_cindex > best_cindex:
+                best_cindex = valid_cindex
+                best_model_state = self.model.state_dict().copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
                 
             #Print progress
             if verbose:

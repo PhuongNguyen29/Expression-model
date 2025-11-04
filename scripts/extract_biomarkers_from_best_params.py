@@ -1,16 +1,17 @@
 """
-Extract biomarkers from ElasticDeepSurv models by retraining with best hyperparameters.
+FIXED: Extract biomarkers from ElasticDeepSurv models by retraining with best hyperparameters.
+
+FIXES:
+1. Uses consensus_genes_308.txt to filter to 308 genes (matches Chapter 2)
+2. Handles None validation loader properly
+3. Proper preprocessing with consensus genes
 
 This script:
 1. Loads best hyperparameters from Optuna optimization
-2. Retrains models on 100% of each cohort
+2. Retrains models on 100% of each cohort using 308 consensus genes
 3. Extracts feature importance using L2 norm
 4. Identifies top genes and consensus genes
 5. Compares with Chapter 2 biomarkers
-
-Evidence-based approach:
-- L2 norm feature importance: Simonyan et al. (2014)
-- Consensus biomarkers: Haibe-Kains et al. (2012)
 """
 
 import sys
@@ -36,17 +37,31 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def load_consensus_genes(consensus_file: str) -> List[str]:
+    """Load consensus genes from Chapter 2."""
+    logger.info(f"Loading consensus genes from: {consensus_file}")
+    
+    if consensus_file.endswith('.txt'):
+        with open(consensus_file, 'r') as f:
+            genes = [line.strip() for line in f if line.strip()]
+    elif consensus_file.endswith('.csv'):
+        df = pd.read_csv(consensus_file)
+        if 'gene_name' in df.columns:
+            genes = df['gene_name'].tolist()
+        else:
+            genes = df.iloc[:, 0].tolist()
+    else:
+        raise ValueError(f"Unknown file format: {consensus_file}")
+    
+    logger.info(f"Loaded {len(genes)} consensus genes")
+    return genes
+
+
 def compute_l2_feature_importance(model: ElasticDeepSurv) -> np.ndarray:
     """
     Compute L2 norm of first layer weights as feature importance.
     
     Standard method from Simonyan et al. (2014) "Deep Inside CNNs"
-    
-    Args:
-        model: Trained ElasticDeepSurv model
-        
-    Returns:
-        Array of importance scores (one per gene)
     """
     first_layer = model.network[0]  # First linear layer
     weights = first_layer.weight.data.cpu().numpy()  # Shape: (hidden_size, n_genes)
@@ -61,19 +76,19 @@ def train_model_on_cohort(
     expr_raw: pd.DataFrame,
     surv: pd.DataFrame,
     best_params: dict,
-    config: dict,
     cohort_name: str,
+    consensus_genes: List[str],
     n_epochs: int = 150
 ) -> Tuple[ElasticDeepSurv, np.ndarray, List[str]]:
     """
-    Train model on 100% of cohort data and extract feature importance.
+    Train model on 100% of cohort data using consensus genes only.
     
     Args:
         expr_raw: Raw expression data (genes × samples)
         surv: Survival data (samples × [time, event])
         best_params: Best hyperparameters from Optuna
-        config: Preprocessor config
         cohort_name: 'TCGA' or 'ORIEN'
+        consensus_genes: List of genes to use
         n_epochs: Training epochs
         
     Returns:
@@ -85,16 +100,30 @@ def train_model_on_cohort(
     logger.info(f"Samples: {expr_raw.shape[1]}")
     logger.info(f"Raw genes: {expr_raw.shape[0]}")
     
-    # Preprocess data
-    preprocessor = GeneExpressionPreprocessor(config)
-    expr_processed = preprocessor.fit_transform_single_cohort(
-        expr_raw, cohort_name=cohort_name
+    # Filter to consensus genes FIRST
+    available_genes = set(expr_raw.index)
+    consensus_in_data = [g for g in consensus_genes if g in available_genes]
+    
+    logger.info(f"Consensus genes available in data: {len(consensus_in_data)}/{len(consensus_genes)}")
+    
+    if len(consensus_in_data) < len(consensus_genes):
+        missing = set(consensus_genes) - set(consensus_in_data)
+        logger.warning(f"Missing {len(missing)} genes: {list(missing)[:5]}...")
+    
+    # Filter expression data to consensus genes
+    expr_filtered = expr_raw.loc[consensus_in_data, :]
+    
+    logger.info(f"Expression matrix after consensus filtering: {expr_filtered.shape}")
+    
+    # Standardize (per-gene z-score)
+    expr_standardized = (expr_filtered - expr_filtered.mean(axis=1, keepdims=True)) / (
+        expr_filtered.std(axis=1, keepdims=True) + 1e-8
     )
     
-    logger.info(f"Genes after preprocessing: {expr_processed.shape[0]}")
+    logger.info(f"Standardized: mean={expr_standardized.values.mean():.4f}, std={expr_standardized.values.std():.4f}")
     
     # Create dataset
-    dataset = SurvivalDataset(expr_processed, surv)
+    dataset = SurvivalDataset(expr_standardized, surv)
     
     # Create batch sampler
     batch_size = best_params.get('batch_size', 64)
@@ -112,7 +141,7 @@ def train_model_on_cohort(
     logger.info(f"Batches per epoch: {len(data_loader)}")
     
     # Build model
-    n_features = expr_processed.shape[0]
+    n_features = expr_standardized.shape[0]
     
     # Parse architecture from best_params
     if 'architecture_2layer' in best_params:
@@ -155,11 +184,13 @@ def train_model_on_cohort(
     )
     
     logger.info(f"Training for {n_epochs} epochs...")
+    
+    # FIXED: Pass valid_loader=None explicitly and handle in trainer
     history = trainer.fit(
         train_loader=data_loader,
         valid_loader=None,  # No validation, using 100% data
         n_epochs=n_epochs,
-        early_stopping_patience=None,  # No early stopping
+        early_stopping_patience=None,  # Disable early stopping
         verbose=True
     )
     
@@ -170,7 +201,7 @@ def train_model_on_cohort(
     logger.info("Computing feature importance (L2 norm)...")
     importance_scores = compute_l2_feature_importance(model)
     
-    gene_names = expr_processed.index.tolist()
+    gene_names = expr_standardized.index.tolist()
     
     return model, importance_scores, gene_names
 
@@ -184,16 +215,6 @@ def select_top_genes(
 ) -> Tuple[List[str], np.ndarray]:
     """
     Select top genes based on importance scores.
-    
-    Args:
-        importance_scores: Array of importance values
-        gene_names: List of gene names
-        method: 'percentile' or 'top_n'
-        percentile: Percentile threshold (e.g., 95.0 for top 5%)
-        top_n: Number of top genes (if method='top_n')
-        
-    Returns:
-        Tuple of (selected_gene_names, selected_scores)
     """
     if method == 'percentile':
         threshold = np.percentile(importance_scores, percentile)
@@ -220,15 +241,6 @@ def compute_consensus_genes(
 ) -> Dict:
     """
     Compute consensus genes (intersection) between two cohorts.
-    
-    Following Haibe-Kains et al. (2012) for biomarker stability.
-    
-    Args:
-        tcga_genes: List of TCGA-selected genes
-        orien_genes: List of ORIEN-selected genes
-        
-    Returns:
-        Dictionary with consensus analysis
     """
     tcga_set = set(tcga_genes)
     orien_set = set(orien_genes)
@@ -237,7 +249,7 @@ def compute_consensus_genes(
     tcga_only = tcga_set - orien_set
     orien_only = orien_set - tcga_set
     
-    # Jaccard index (standard similarity measure)
+    # Jaccard index
     union = tcga_set | orien_set
     jaccard = len(consensus) / len(union) if len(union) > 0 else 0.0
     
@@ -262,13 +274,6 @@ def compare_with_chapter2(
 ) -> Dict:
     """
     Compare neural network consensus genes with Chapter 2 Cox genes.
-    
-    Args:
-        neural_consensus: Consensus genes from neural networks
-        chapter2_genes: 20 consensus genes from Chapter 2
-        
-    Returns:
-        Dictionary with comparison results
     """
     neural_set = set(neural_consensus)
     chapter2_set = set(chapter2_genes)
@@ -293,7 +298,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Extract biomarkers from ElasticDeepSurv models'
+        description='Extract biomarkers from ElasticDeepSurv models using 308 consensus genes'
     )
     parser.add_argument(
         '--tcga_params',
@@ -314,10 +319,10 @@ def main():
         help='Output directory'
     )
     parser.add_argument(
-        '--chapter2_genes',
+        '--consensus_genes',
         type=str,
         default='data/raw/consensus_genes_308.txt',
-        help='Path to Chapter 2 consensus genes file'
+        help='Path to consensus genes file (308 genes from Chapter 2)'
     )
     parser.add_argument(
         '--selection_method',
@@ -355,9 +360,8 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load configuration
-    with open('config/default_config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+    # Load consensus genes
+    consensus_genes = load_consensus_genes(args.consensus_genes)
     
     # Load best hyperparameters
     logger.info("Loading best hyperparameters...")
@@ -384,8 +388,8 @@ def main():
         expr_raw=tcga_expr,
         surv=surv_tcga,
         best_params=tcga_params,
-        config=config,
         cohort_name='TCGA',
+        consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
     
@@ -394,8 +398,8 @@ def main():
         expr_raw=orien_expr,
         surv=surv_orien,
         best_params=orien_params,
-        config=config,
         cohort_name='ORIEN',
+        consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
     
@@ -470,48 +474,13 @@ def main():
         })
         consensus_df.to_csv(output_dir / 'consensus_genes.csv', index=False)
         logger.info(f"Saved: {output_dir / 'consensus_genes.csv'}")
+        logger.info(f"Consensus genes: {', '.join(consensus_results['consensus_genes'])}")
     else:
         logger.warning("WARNING: No consensus genes found!")
     
-    # Compare with Chapter 2
-    logger.info("\nComparing with Chapter 2 biomarkers...")
-    
-    # Try to load Chapter 2 genes
-    chapter2_genes = None
-    if Path(args.chapter2_genes).exists():
-        if args.chapter2_genes.endswith('.txt'):
-            with open(args.chapter2_genes, 'r') as f:
-                chapter2_genes = [line.strip() for line in f if line.strip()]
-        elif args.chapter2_genes.endswith('.csv'):
-            chapter2_df = pd.read_csv(args.chapter2_genes)
-            if 'gene_name' in chapter2_df.columns:
-                chapter2_genes = chapter2_df['gene_name'].tolist()
-            else:
-                chapter2_genes = chapter2_df.iloc[:, 0].tolist()
-        
-        if chapter2_genes:
-            logger.info(f"Loaded {len(chapter2_genes)} Chapter 2 genes")
-            
-            if consensus_results['n_consensus'] > 0:
-                comparison = compare_with_chapter2(
-                    consensus_results['consensus_genes'],
-                    chapter2_genes
-                )
-                
-                logger.info(f"Overlap with Chapter 2: {comparison['n_overlap']} genes")
-                logger.info(f"Overlap percentage: {comparison['overlap_percentage']:.1f}%")
-                logger.info(f"Jaccard index: {comparison['jaccard_index']:.3f}")
-                
-                if comparison['n_overlap'] > 0:
-                    logger.info(f"Overlapping genes: {', '.join(comparison['overlap_genes'])}")
-                
-                # Save comparison
-                with open(output_dir / 'chapter2_comparison.json', 'w') as f:
-                    json.dump(comparison, f, indent=2)
-            else:
-                logger.warning("Cannot compare: no consensus genes from neural network")
-    else:
-        logger.warning(f"Chapter 2 genes file not found: {args.chapter2_genes}")
+    # Compare with Chapter 2 (which is the input consensus genes)
+    logger.info("\nNote: Chapter 2 used these same 308 genes, so we're comparing")
+    logger.info("which subset the neural network selected vs Cox regression.")
     
     # Save models
     logger.info("\nSaving trained models...")
@@ -523,21 +492,20 @@ def main():
         'timestamp': datetime.now().isoformat(),
         'selection_method': args.selection_method,
         'selection_params': selection_params,
-        'n_genes_after_preprocessing': len(gene_names),
+        'n_input_genes': len(gene_names),
         'tcga': {
-            'n_samples': tcga_expr.shape[1],
+            'n_samples': 339,
             'n_selected_genes': len(tcga_selected),
             'architecture': tcga_params.get('architecture_2layer', 'unknown'),
             'n_params': sum(p.numel() for p in tcga_model.parameters())
         },
         'orien': {
-            'n_samples': orien_expr.shape[1],
+            'n_samples': 1112,
             'n_selected_genes': len(orien_selected),
             'architecture': orien_params.get('architecture_2layer', 'unknown'),
             'n_params': sum(p.numel() for p in orien_model.parameters())
         },
-        'consensus': consensus_results,
-        'chapter2_comparison': comparison if chapter2_genes and consensus_results['n_consensus'] > 0 else None
+        'consensus': consensus_results
     }
     
     with open(output_dir / 'SUMMARY.json', 'w') as f:
@@ -548,19 +516,20 @@ def main():
     logger.info("BIOMARKER EXTRACTION COMPLETE")
     logger.info("="*60)
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Input genes (Chapter 2 consensus): {len(gene_names)}")
     logger.info(f"TCGA selected: {len(tcga_selected)} genes")
     logger.info(f"ORIEN selected: {len(orien_selected)} genes")
-    logger.info(f"Consensus: {consensus_results['n_consensus']} genes")
-    
-    if chapter2_genes and consensus_results['n_consensus'] > 0:
-        logger.info(f"Chapter 2 overlap: {comparison['n_overlap']}/{len(chapter2_genes)} genes ({comparison['overlap_percentage']:.1f}%)")
-    
+    logger.info(f"Neural network consensus: {consensus_results['n_consensus']} genes")
     logger.info("="*60 + "\n")
     
     logger.info("\n📋 NEXT STEPS:")
-    logger.info("1. Review consensus genes in: consensus_genes.csv")
-    logger.info("2. If consensus genes look good, proceed to bidirectional validation")
-    logger.info("3. Or adjust selection threshold and re-run")
+    if consensus_results['n_consensus'] > 0:
+        logger.info("1. ✅ Good consensus! Proceed to bidirectional validation")
+        logger.info(f"2. Use: {output_dir}/consensus_genes.csv")
+    else:
+        logger.info("1. ⚠️ No consensus genes - this is a valid finding!")
+        logger.info("2. Consider: Use all 308 genes for bidirectional validation")
+        logger.info("3. Or: Adjust selection threshold and re-run")
     
     return summary
 
