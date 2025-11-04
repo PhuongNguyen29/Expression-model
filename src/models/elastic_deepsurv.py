@@ -368,6 +368,12 @@ class ElasticDeepSurvTrainer:
                     patience_counter = 0
                 else:
                     patience_counter += 1
+        
+                if patience_counter >= early_stopping_patience:
+                    logger.info(f"Early stopping at epoch {epoch+1}.")
+                    if verbose:
+                        logger.info(f"Best C-index: {best_cindex:.4f}")
+                    break
                 
             #Print progress
             if verbose:
@@ -378,10 +384,6 @@ class ElasticDeepSurvTrainer:
                     f"Valid C-index: {valid_cindex:.4f} | "
                     f"Sparsity: {sparsity_ratio:.1%}"
                 )
-        
-                if patience_counter >= early_stopping_patience:
-                    logger.info(f"Early stopping at epoch {epoch+1}.")
-                    break
             
         #Restore best model
         if best_model_state is not None:
