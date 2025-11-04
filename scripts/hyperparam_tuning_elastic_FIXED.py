@@ -32,6 +32,59 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+def create_survival_stratification_bins(
+    times: np.ndarray,
+    events: np.ndarray,
+    n_time_bins: int = 4
+) -> np.ndarray:
+    """
+    Create stratification bins combining event status and survival time.
+    
+    Based on: Simon et al. (2011), Mogensen et al. (2012)
+    
+    This ensures each CV fold has:
+    1. Similar proportion of events vs censored
+    2. Similar distribution of survival times
+    """
+    import pandas as pd
+    
+    strat_bins = np.zeros(len(times), dtype=int)
+    
+    # Bin censored samples by time quartiles
+    censored_mask = (events == 0)
+    if censored_mask.sum() > n_time_bins:
+        try:
+            censored_bins = pd.qcut(
+                times[censored_mask],
+                q=n_time_bins,
+                labels=False,
+                duplicates='drop'
+            )
+            strat_bins[censored_mask] = censored_bins
+        except ValueError:
+            strat_bins[censored_mask] = 0
+    else:
+        strat_bins[censored_mask] = 0
+    
+    # Bin event samples by time quartiles (offset by n_time_bins)
+    event_mask = (events == 1)
+    if event_mask.sum() > n_time_bins:
+        try:
+            event_bins = pd.qcut(
+                times[event_mask],
+                q=n_time_bins,
+                labels=False,
+                duplicates='drop'
+            )
+            strat_bins[event_mask] = event_bins + n_time_bins
+        except ValueError:
+            strat_bins[event_mask] = n_time_bins
+    else:
+        strat_bins[event_mask] = n_time_bins
+    
+    logger.info(f"Created {len(np.unique(strat_bins))} stratification bins")
+    
+    return strat_bins
 
 class LeakageFreeHyperparameterTuner:
     """
@@ -44,15 +97,15 @@ class LeakageFreeHyperparameterTuner:
     """
     
     def __init__(
-        self,
-        train_expr_raw: pd.DataFrame,  # RAW expression data
-        train_surv: pd.DataFrame,
-        config: dict,
-        cohort_name: str = None,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        seed: int = 42
+    self,
+    train_expr_raw: pd.DataFrame,
+    train_surv: pd.DataFrame,
+    config: dict,
+    cohort_name: str = None,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+    seed: int = 42
     ):
-        self.train_expr_raw = train_expr_raw  # Keep raw data
+        self.train_expr_raw = train_expr_raw
         self.train_surv = train_surv
         self.config = config
         self.cohort_name = cohort_name
@@ -61,7 +114,17 @@ class LeakageFreeHyperparameterTuner:
         
         self.n_samples = train_expr_raw.shape[1]
         self.n_genes_raw = train_expr_raw.shape[0]
+        
+        # For stratification
         self.events = train_surv['event'].values
+        self.times = train_surv['time'].values
+        
+        # Create enhanced stratification bins (event + time)
+        self.strat_bins = create_survival_stratification_bins(
+            self.times,
+            self.events,
+            n_time_bins=4
+        )
         
         self.n_folds = 5
         
@@ -70,6 +133,8 @@ class LeakageFreeHyperparameterTuner:
         logger.info(f"  Samples: {self.n_samples}")
         logger.info(f"  Raw genes: {self.n_genes_raw}")
         logger.info(f"  Event rate: {self.events.mean():.1%}")
+        logger.info(f"  Median survival: {np.median(self.times):.0f}")
+        logger.info(f"  Stratification bins: {len(np.unique(self.strat_bins))}")
         
         self._set_seed(seed)
     
@@ -142,21 +207,34 @@ class LeakageFreeHyperparameterTuner:
         if self.n_samples < 500:  # TCGA
             n_layers = trial.suggest_int('n_layers', 1, 2)
             if n_layers == 1:
-                hidden_sizes = [trial.suggest_categorical('h1', [128, 256])]
-            else:
-                h1 = trial.suggest_categorical('h1', [256, 384])
-                h2 = trial.suggest_categorical('h2', [64, 128])
-                hidden_sizes = [h1, h2]
+                layer1_size = trial.suggest_categorical('layer1_size', [128, 256, 384])
+                hidden_sizes = [layer1_size]
+            else:  # n_layers == 2
+            # Two layers: use predefined patterns to avoid Optuna conflicts
+                architecture = trial.suggest_categorical(
+                    'architecture_2layer',
+                    ['256-64',   # 3.80M params - narrow funnel
+                    '256-128',  # 3.82M params - wider second layer
+                    '384-64',   # 5.68M params - aggressive funnel
+                    '384-128']) # 5.72M params - moderate funnel
+                hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
             batch_size = trial.suggest_categorical('batch_size', [32, 48])
         else:  # ORIEN
-            n_layers = trial.suggest_int('n_layers', 2, 3)
             if n_layers == 2:
-                pattern = trial.suggest_categorical('pattern', ['512-128', '384-96', '256-64'])
-                hidden_sizes = [int(x) for x in pattern.split('-')]
+                architecture = trial.suggest_categorical(
+                    'architecture_2layer',
+                    ['512-128',  # 7.60M params
+                    '384-96',   # 5.68M params
+                    '256-64'])  # 3.80M params
+                hidden_sizes = [int(x) for x in architecture.split('-')]
             else:
-                pattern = trial.suggest_categorical('pattern', ['512-256-64', '384-192-48'])
-                hidden_sizes = [int(x) for x in pattern.split('-')]
+                architecture = trial.suggest_categorical(
+                'architecture_3layer',
+                ['512-256-64',   # 7.66M params - gradual funnel
+                '384-192-48',   # 5.69M params - proportional reduction
+                '256-128-32'])  # 3.82M params - conservative
+                hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
         
@@ -174,14 +252,29 @@ class LeakageFreeHyperparameterTuner:
         cv_scores = []
         
         for fold, (train_idx, val_idx) in enumerate(skf.split(
-            range(self.n_samples), self.events
-        )):
-            logger.info(f"\n  Fold {fold+1}/{self.n_folds}")
+        range(self.n_samples),
+        self.strat_bins  # Use enhanced stratification (event + time)
+    )):
+            # Log fold statistics for verification
+            train_event_rate = self.events[train_idx].mean()
+            val_event_rate = self.events[val_idx].mean()
+            train_median_time = np.median(self.times[train_idx])
+            val_median_time = np.median(self.times[val_idx])
             
-            # CRITICAL: Preprocess this fold independently
+            logger.info(f"\n  Fold {fold+1}/{self.n_folds}:")
+            logger.info(f"    Train: {len(train_idx)} samples, "
+                    f"{train_event_rate:.1%} events, "
+                    f"median time = {train_median_time:.0f}")
+            logger.info(f"    Val:   {len(val_idx)} samples, "
+                    f"{val_event_rate:.1%} events, "
+                    f"median time = {val_median_time:.0f}")
+            
+            # CRITICAL: Preprocess this fold independently (prevents data leakage)
             train_dataset, val_dataset, n_features = self.preprocess_fold(
                 train_idx, val_idx
             )
+            
+            logger.info(f"    Features after preprocessing: {n_features}")
             
             # Create data loaders
             train_loader = DataLoader(
@@ -211,7 +304,7 @@ class LeakageFreeHyperparameterTuner:
             trainer = ElasticDeepSurvTrainer(
                 model=model,
                 learning_rate=learning_rate,
-                weight_decay=0.0,  # Use elastic net instead
+                weight_decay=0.0,  # Use elastic net instead of weight decay
                 device=self.device
             )
             
@@ -228,22 +321,28 @@ class LeakageFreeHyperparameterTuner:
                 best_cindex = max(history['valid_c_index'])
                 cv_scores.append(best_cindex)
                 
-                logger.info(f"    C-index: {best_cindex:.4f}")
+                logger.info(f"    Best C-index: {best_cindex:.4f}")
                 
             except Exception as e:
-                logger.warning(f"    Fold failed: {e}")
-                cv_scores.append(0.5)
+                logger.warning(f"    Fold {fold+1} failed: {e}")
+                cv_scores.append(0.5)  # Worst case baseline
                 continue
             
-            # Report for pruning
+            # Report intermediate value for pruning
             trial.report(np.mean(cv_scores), fold)
+            
+            # Prune unpromising trials early
             if trial.should_prune():
+                logger.info(f"  Trial pruned at fold {fold+1}")
                 raise optuna.TrialPruned()
         
         mean_cindex = np.mean(cv_scores)
         std_cindex = np.std(cv_scores)
         
-        logger.info(f"Trial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
+        logger.info(f"\nTrial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
+        logger.info(f"  Architecture: {hidden_sizes}")
+        logger.info(f"  Alpha: {alpha:.4e}, L1 ratio: {l1_ratio:.2f}")
+        logger.info(f"  Learning rate: {learning_rate:.4e}")
         
         return mean_cindex
     
