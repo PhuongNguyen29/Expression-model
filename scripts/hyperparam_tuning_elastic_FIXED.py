@@ -219,6 +219,7 @@ class LeakageFreeHyperparameterTuner:
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
             batch_size = trial.suggest_categorical('batch_size', [32, 48])
         else:  # ORIEN
+            n_layers = trial.suggest_int('n_layers', 2, 3)
             if n_layers == 2:
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
