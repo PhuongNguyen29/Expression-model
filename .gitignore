@@ -1,5 +1,5 @@
 # =====================================
-# Python and general build artifacts
+# PYTHON & GENERAL BUILD ARTIFACTS
 # =====================================
 __pycache__/
 *.py[cod]
@@ -10,16 +10,19 @@ __pycache__/
 dist/
 build/
 .eggs/
+.pytest_cache/
+*.pyo
+*.pyd
 
 # =====================================
-# Jupyter Notebooks
+# JUPYTER NOTEBOOKS
 # =====================================
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 */.ipynb_checkpoints/*
 
 # =====================================
-# Virtual Environments
+# VIRTUAL ENVIRONMENTS
 # =====================================
 env/
 venv/
@@ -30,7 +33,7 @@ conda-env/
 .conda/
 
 # =====================================
-# IDE / OS metadata
+# IDE / OS METADATA
 # =====================================
 .vscode/
 .idea/
@@ -40,65 +43,113 @@ conda-env/
 .DS_Store
 Thumbs.db
 .Trash-*
+*.sublime-*
 
 # =====================================
-# Biomedical & large data (CRITICAL)
-# Ignore only top-level data folders
+# LARGE DATA FILES (BIOMEDICAL)
 # =====================================
-/data/
+# Exclude large expression/clinical data files
+data/raw/*.csv
+data/raw/*.tsv
+data/raw/*.xlsx
+data/raw/*.gz
+data/raw/*.zip
+
+data/processed/*.csv
+data/processed/*.tsv
+data/processed/*.pkl
+data/processed/*.pickle
+data/processed/*.h5
+data/processed/*.hdf5
+data/processed/*.feather
+data/processed/*.parquet
+
+# Keep small reference files
+!data/raw/consensus_genes_308.txt
+!data/raw/README.md
+!data/processed/README.md
+!data/*/README.md
+
+# Exclude any accidentally created data directories
 /raw_data/
 /processed_data/
-*.csv
-*.tsv
-*.xlsx
-*.h5
-*.hdf5
-*.pkl
-*.pickle
-*.npy
-*.npz
-*.feather
-*.parquet
-
-# =====================================
-# TCGA / ORIEN data
-# =====================================
 /tcga_data/
 /orien_data/
 /clinical_data/
 /expression_data/
-*.gct
-*.gct.gz
-*.maf
 
 # =====================================
-# Model files & large binaries
-# Ignore only top-level model folders
+# MODEL CHECKPOINTS & LARGE BINARIES
 # =====================================
-/models/
-/checkpoints/
-/saved_models/
-/model_weights/
+# Trained model files (large)
 *.pth
 *.pt
 *.ckpt
 *.pb
 *.h5
+*.hdf5
+
+# Numpy arrays & pickles (potentially large)
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# Exclude these even in FINAL_chapter3
+results/FINAL_chapter3/**/*.pth
+results/FINAL_chapter3/**/*.pkl
+results/FINAL_chapter3/**/*.pt
+results/FINAL_chapter3/**/*.h5
+
+# But keep the directory structure
+!results/FINAL_chapter3/
+!results/FINAL_chapter3/**/
+!results/FINAL_chapter3/**/.gitkeep
 
 # =====================================
-# Results, figures, logs (keep structure)
+# RESULTS & OUTPUTS (HPC-ONLY)
 # =====================================
+# Exclude all results except FINAL_chapter3
 results/*
 !results/.gitkeep
-figures/*
-!figures/.gitkeep
-logs/*
-!logs/.gitkeep
+!results/FINAL_chapter3/
+
+# Within FINAL_chapter3, keep metadata but exclude models
+!results/FINAL_chapter3/**/*.json
+!results/FINAL_chapter3/**/*.csv
+!results/FINAL_chapter3/**/*.txt
+!results/FINAL_chapter3/**/README.md
 
 # =====================================
-# Experiment / training artifacts
+# LOGS (HPC-ONLY)
 # =====================================
+logs/
 *.log
+*.out
+*.err
+!logs/.gitkeep
+
+# SLURM/SGE job logs
+slurm-*.out
+job_logs/
+
+# =====================================
+# FIGURES (SELECTIVE)
+# =====================================
+# Exclude figures directory but keep final versions
+figures/*
+!figures/.gitkeep
+!figures/final/
+!figures/final/**
+
+# If you want to track specific figure types in FINAL_chapter3
+!results/FINAL_chapter3/**/*.png
+!results/FINAL_chapter3/**/*.pdf
+!results/FINAL_chapter3/**/*.svg
+
+# =====================================
+# EXPERIMENT / TRAINING ARTIFACTS
+# =====================================
 *.tmp
 *.temp
 *.cache
@@ -106,13 +157,25 @@ wandb/
 mlruns/
 tensorboard/
 .tensorboard/
-job_logs/
-slurm-*.out
-*.err
-*.out
 
 # =====================================
-# Environment / credentials
+# BIOINFORMATICS FILE FORMATS (LARGE)
+# =====================================
+*.gct
+*.gct.gz
+*.maf
+*.bed
+*.bam
+*.sam
+*.vcf
+*.vcf.gz
+*.fastq
+*.fastq.gz
+*.fasta
+*.fa
+
+# =====================================
+# ENVIRONMENT / CREDENTIALS
 # =====================================
 .env
 .env.local
@@ -122,60 +185,48 @@ config/secrets.yaml
 credentials/
 
 # =====================================
-# Output files (non-source)
+# TESTING & COVERAGE
 # =====================================
-*.pdf
-*.png
-*.jpg
-*.jpeg
-*.svg
-*.eps
-!figures/examples/*
-
-# =====================================
-# Documentation build
-# =====================================
-docs/_build/
-docs/_static/
-docs/_templates/
-
-# =====================================
-# Testing & coverage
-# =====================================
-.pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 
 # =====================================
-# R / Miscellaneous
+# DOCUMENTATION BUILD
+# =====================================
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# =====================================
+# R / MISCELLANEOUS
 # =====================================
 .Rhistory
 .Rdata
 .Rproj.user/
 
 # =====================================
-# Archives and large files
+# BACKUPS & ORPHANED FILES
 # =====================================
-*.zip
-*.tar
-*.tar.gz
-*.gz
+*.backup
+*.bak
+*.old
+--config
+--verbose
 
 # =====================================
-# Always include key text/config files
+# ALWAYS TRACK THESE (EXPLICIT INCLUDE)
 # =====================================
+# These are already not excluded, but making it explicit
 !requirements.txt
 !environment.yml
+!README.md
+!LICENSE
+!.gitignore
 
-# =====================================
-# --- Allow source code & configs ---
-# Never ignore Python or YAML code in these dirs
-# =====================================
+# Track all source code
 !src/**/*.py
-!src/**/*.ipynb
-!src/**/*.yaml
 !scripts/**/*.py
-!scripts/**/*.ipynb
+!scripts/**/*.sh
 !config/**/*.yaml
