@@ -31,6 +31,7 @@ import torch.nn as nn
 from datetime import datetime
 from sklearn.model_selection import train_test_split
 
+
 # Add project root to path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
@@ -40,6 +41,8 @@ from src.models.elastic_deepsurv import ElasticDeepSurv
 from torch.utils.data import TensorDataset, DataLoader
 from src.utils.batch_samplers import StratifiedBatchSampler
 from lifelines.utils import concordance_index
+from src.utils.proximal_optimizer import create_proximal_optimizer
+from src.models.deepsurv import CoxPHLoss
 
 # Setup logging
 logging.basicConfig(
@@ -199,8 +202,14 @@ class AlphaInvestigator:
         
         # Create model
         model = ElasticDeepSurv(**config).to(self.device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        
+        optimizer = create_proximal_optimizer(
+            model.parameters(),
+            optimizer_type='fista',  # or 'proximal_gd'
+            lr=learning_rate,
+            alpha=alpha,
+            l1_ratio=config['l1_ratio'],
+            use_group_lasso=True
+            )
         # Create enhanced stratification bins (event + time)
         strat_bins = create_survival_stratification_bins(
             self.T.cpu().numpy(),
@@ -273,7 +282,8 @@ class AlphaInvestigator:
                 risk_scores = model(X_batch)
                 
                 # Cox loss (elastic net penalty already in model)
-                loss = model.compute_loss(risk_scores, T_batch, E_batch)
+                cox_criterion = CoxPHLoss()
+                loss = cox_criterion(risk_scores, T_batch, E_batch)
                 
                 # Backward pass
                 optimizer.zero_grad()

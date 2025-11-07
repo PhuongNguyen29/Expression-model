@@ -233,41 +233,41 @@ def get_regularization_path(
         'optimal_alpha': alphas[np.argmin([l + p for l, p in zip(losses, penalties)])]
     }
 
-    if __name__ == "__main__":
-        import torch.nn as nn
-        print("="*60)
-        print("Testing elastic Net Regularization Utilities")
-        print
-        # Example usage
-        model = nn.Sequential(
-            nn.Linear(100, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
-        
-        l1 = l1_penalty(model)
-        print(f"L1 Penalty: {l1.item():.4f}")
-        l2 = l2_penalty(model)
-        print(f"L2 Penalty: {l2.item():.4f}")
-        
-        #Test ElasticNet with different ratios
-        print("\nElastic Net Penalties with different l1_ratios:")
-        for l1_ratio in [0.0, 0.3, 0.5, 0.7, 1.0]:
-            penalty = elastic_net_penalty(model, alpha=0.1, l1_ratio=l1_ratio)
-            print(f"  L1 Ratio: {l1_ratio:.1f}, Elastic Net Penalty: {penalty.item():.4f}")
+if __name__ == "__main__":
+    import torch.nn as nn
+    print("="*60)
+    print("Testing elastic Net Regularization Utilities")
+    print
+    # Example usage
+    model = nn.Sequential(
+        nn.Linear(100, 64),
+        nn.ReLU(),
+        nn.Linear(64, 32),
+        nn.ReLU(),
+        nn.Linear(32, 1)
+    )
+    
+    l1 = l1_penalty(model)
+    print(f"L1 Penalty: {l1.item():.4f}")
+    l2 = l2_penalty(model)
+    print(f"L2 Penalty: {l2.item():.4f}")
+    
+    #Test ElasticNet with different ratios
+    print("\nElastic Net Penalties with different l1_ratios:")
+    for l1_ratio in [0.0, 0.3, 0.5, 0.7, 1.0]:
+        penalty = elastic_net_penalty(model, alpha=0.1, l1_ratio=l1_ratio)
+        print(f"  L1 Ratio: {l1_ratio:.1f}, Elastic Net Penalty: {penalty.item():.4f}")
 
-        zeros, total, ratio = count_zero_weights(model, threshold=1e-6)
-        print(f"\nSparsity: {zeros}/{total} weights are effectively zero ({ratio*100:.2f}%)")
+    zeros, total, ratio = count_zero_weights(model, threshold=1e-6)
+    print(f"\nSparsity: {zeros}/{total} weights are effectively zero ({ratio*100:.2f}%)")
+    
+    #test feature importance
+    gene_names = [f"GENE_{i}" for i in range(100)]
+    importances = get_feature_importance(model, gene_names)
+    print("\ntop 5 most important features:")
+    for name, score in importances[:5]:  # Show top 5
+        print(f"  {name}: {score:.4f}")
         
-        #test feature importance
-        gene_names = [f"GENE_{i}" for i in range(100)]
-        importances = compute_feature_importance(model, gene_names)
-        print("\ntop 5 most important features:")
-        for name, score in importances[:5]:  # Show top 5
-            print(f"  {name}: {score:.4f}")
-            
-        print("\n" + "="*60)
-        print("All tests completed.")
-        print("="*60)
+    print("\n" + "="*60)
+    print("All tests completed.")
+    print("="*60)
