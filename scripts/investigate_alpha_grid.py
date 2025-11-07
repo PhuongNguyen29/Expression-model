@@ -232,7 +232,7 @@ class AlphaInvestigator:
 
         # Create stratified batch sampler (matching production code)
         train_sampler = StratifiedBatchSampler(
-            labels=E_train.cpu().numpy(),
+            events=E_train.cpu().numpy(),
             batch_size=batch_size,
             shuffle=True
         )
