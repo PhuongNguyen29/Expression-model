@@ -20,7 +20,7 @@ dataset:
   # Processing
   use_common_genes: false
   use_consensus_genes: true
-  consensus_gene_file: "consensus_genes_308.txt"
+  consensus_gene_file: "data/raw/consensus_genes_308.txt"
 
   # Standardization (critical for neural networks)
   standardize: true
