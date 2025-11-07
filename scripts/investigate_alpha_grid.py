@@ -404,17 +404,15 @@ class AlphaInvestigator:
     
     def _extract_feature_importance(self, model: ElasticDeepSurv) -> np.ndarray:
         """
-        Extract feature importance from first layer weights.
-        Method: L1 norm of weights for each input feature.
-        
-        Based on: Lundberg & Lee (2017) "A unified approach to interpreting model predictions"
+        Extract feature importance using model's built-in method.
         """
-        first_layer_weights = model.fc1.weight.data.cpu().numpy()  # Shape: [hidden_dim, input_dim]
+        # Use the model's get_feature_importance method
+        importance_list = model.get_feature_importance()
         
-        # L1 norm across hidden units for each input feature
-        feature_importance = np.abs(first_layer_weights).sum(axis=0)  # Shape: [input_dim]
+        # Convert to numpy array (sorted by feature index)
+        importances = np.array([imp for _, imp in importance_list])
         
-        return feature_importance
+        return importances
     
     def _calculate_sparsity_metrics(self, importances: np.ndarray) -> dict:
         """

@@ -82,9 +82,19 @@ class DatasetFactory:
         )
         
         # Filter to common genes if configured
-        if self.dataset_config.get('use_common_genes', True):
+        if self.dataset_config.get('use_consensus_genes', False):
+            consensus_file = Path(self.dataset_config.get('consensus_gene_file'))
+            with open(consensus_file, 'r') as f:
+                consensus_genes = [line.strip() for line in f]
+            logger.info(f"  Filtering to {len(consensus_genes)} consensus genes")
+            tcga_expr = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
+            orien_expr = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
+            logger.info(f"  After consensus filter: {len(tcga_expr)} genes")
+
+        # Filter to common genes ONLY if not using consensus
+        elif self.dataset_config.get('use_common_genes', True):
             tcga_expr, orien_expr = self._filter_common_genes(tcga_expr, orien_expr)
-        
+                
         # Apply variance filtering if configured
         min_var_percentile = self.dataset_config.get('min_variance_percentile', 0)
         if min_var_percentile > 0:
