@@ -182,8 +182,8 @@ class AlphaInvestigator:
         
         # Fixed hyperparameters from your current best configuration
         config = {
-            'input_dim': self.n_features,
-            'hidden_layers': [256, 64],  # Your TCGA best architecture
+            'n_features': self.n_features,
+            'hidden_sizes': [256, 64],  # Your TCGA best architecture
             'dropout': 0.3,
             'activation': 'relu',
             'batch_norm': True,
@@ -513,6 +513,10 @@ class AlphaInvestigator:
     
     def _save_summary(self, all_results: list):
         """Create summary table of all results."""
+        if not all_results:  # ADD THIS CHECK
+            logger.warning("No results to summarize")
+            return
+    
         summary_data = []
         
         for result in all_results:
