@@ -131,7 +131,9 @@ class AlphaInvestigator:
         
         # Alpha values to test (logarithmically spaced)
         # Based on Cox elastic net literature (Simon et al. 2011)
-        self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
+        # self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
+        self.lambda_values = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2]
+        self.alpha_values = self.lambda_values
         
         logger.info(f"Testing {len(self.alpha_values)} alpha values: {self.alpha_values}")
         
@@ -202,14 +204,17 @@ class AlphaInvestigator:
         
         # Create model
         model = ElasticDeepSurv(**config).to(self.device)
+        lambda_value = alpha  # Actually using lambda grid now
+
         optimizer = create_proximal_optimizer(
             model.parameters(),
-            optimizer_type='fista',  # or 'proximal_gd'
+            optimizer_type='fista',
             lr=learning_rate,
-            alpha=alpha,
+            alpha=0.1,  # Dummy value, not used
             l1_ratio=config['l1_ratio'],
-            use_group_lasso=True
-            )
+            use_group_lasso=True,
+            lambda_scale=lambda_value  
+        )
         # Create enhanced stratification bins (event + time)
         strat_bins = create_survival_stratification_bins(
             self.T.cpu().numpy(),

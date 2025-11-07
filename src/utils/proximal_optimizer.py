@@ -170,7 +170,8 @@ def create_proximal_optimizer(
     lr: float = 1e-3,
     alpha: float = 0.01,
     l1_ratio: float = 0.7,
-    use_group_lasso: bool = True
+    use_group_lasso: bool = True,
+    lambda_scale: float = None 
 ) -> Optimizer:
     """
     Factory function to create proximal optimizer.
@@ -188,9 +189,14 @@ def create_proximal_optimizer(
     """
     # Create proximal operator
     operator_type = 'group_lasso' if use_group_lasso else 'lasso'
+    if lambda_scale is not None:
+        effective_lambda = lambda_scale
+    else:
+        effective_lambda = alpha * l1_ratio * lr * 0.01  # Default 100x smaller
+
     prox_op = ProximalOperator(
         operator_type=operator_type,
-        lambda_=alpha * l1_ratio * lr  # Scale by learning rate
+        lambda_=effective_lambda
     )
     
     # Create optimizer
