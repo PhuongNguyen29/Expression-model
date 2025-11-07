@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datetime import datetime
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 
 # Add project root to path
 project_root = Path(__file__).resolve().parent.parent
@@ -37,7 +37,8 @@ sys.path.insert(0, str(project_root))
 
 from src.data.data_factory import load_dataset_from_config
 from src.models.elastic_deepsurv import ElasticDeepSurv
-from src.utils.batch_samplers import StratifiedSurvivalSampler
+from torch.utils.data import TensorDataset, DataLoader
+from src.utils.batch_samplers import StratifiedBatchSampler
 from lifelines.utils import concordance_index
 
 # Setup logging
@@ -46,6 +47,52 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_survival_stratification_bins(
+    times: np.ndarray,
+    events: np.ndarray,
+    n_time_bins: int = 4
+) -> np.ndarray:
+    """
+    Create stratification bins combining event status and survival time.
+    Based on: Simon et al. (2011), Mogensen et al. (2012)
+    """
+    strat_bins = np.zeros(len(times), dtype=int)
+    
+    # Bin censored samples by time quartiles
+    censored_mask = (events == 0)
+    if censored_mask.sum() > n_time_bins:
+        try:
+            censored_bins = pd.qcut(
+                times[censored_mask],
+                q=n_time_bins,
+                labels=False,
+                duplicates='drop'
+            )
+            strat_bins[censored_mask] = censored_bins
+        except ValueError:
+            strat_bins[censored_mask] = 0
+    else:
+        strat_bins[censored_mask] = 0
+    
+    # Bin event samples by time quartiles (offset by n_time_bins)
+    event_mask = (events == 1)
+    if event_mask.sum() > n_time_bins:
+        try:
+            event_bins = pd.qcut(
+                times[event_mask],
+                q=n_time_bins,
+                labels=False,
+                duplicates='drop'
+            )
+            strat_bins[event_mask] = event_bins + n_time_bins
+        except ValueError:
+            strat_bins[event_mask] = n_time_bins
+    else:
+        strat_bins[event_mask] = n_time_bins
+    
+    return strat_bins
+
 
 
 class AlphaInvestigator:
@@ -154,55 +201,79 @@ class AlphaInvestigator:
         model = ElasticDeepSurv(**config).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         
-        # Split data (80/20 train/val)
-        n_samples = len(self.X)
-        n_train = int(0.8 * n_samples)
-        
-        # Stratified split by event status
-        indices = np.arange(n_samples)
-        np.random.shuffle(indices)
-        train_idx = indices[:n_train]
-        val_idx = indices[n_train:]
-        
+        # Create enhanced stratification bins (event + time)
+        strat_bins = create_survival_stratification_bins(
+            self.T.cpu().numpy(),
+            self.E.cpu().numpy(),
+            n_time_bins=4
+        )
+
+        # Stratified split using enhanced bins (80/20 train/val)
+        from sklearn.model_selection import train_test_split
+
+        train_idx, val_idx = train_test_split(
+            np.arange(len(self.X)),
+            test_size=0.2,
+            stratify=strat_bins,  # Use enhanced stratification
+            random_state=self.seed
+        )
+
         X_train, X_val = self.X[train_idx], self.X[val_idx]
         T_train, T_val = self.T[train_idx], self.T[val_idx]
         E_train, E_val = self.E[train_idx], self.E[val_idx]
-        
+
+        # Log split statistics
+        logger.info(f"Training on {len(X_train)} samples, validating on {len(X_val)} samples")
+        logger.info(f"Event rates - Train: {E_train.mean().item():.1%}, Val: {E_val.mean().item():.1%}")
+
+        # Create datasets for DataLoader
+        train_dataset = TensorDataset(X_train, T_train, E_train)
+        val_dataset = TensorDataset(X_val, T_val, E_val)
+
+        # Create stratified batch sampler (matching production code)
+        train_sampler = StratifiedBatchSampler(
+            labels=E_train.cpu().numpy(),
+            batch_size=batch_size,
+            shuffle=True
+        )
+
+        # Create DataLoaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            num_workers=0
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False
+        )
+
         # Training metrics storage
         train_losses = []
         val_c_indices = []
         gradient_norms = []
-        
+
         best_c_index = 0
         patience_counter = 0
         best_state = None
-        
-        logger.info(f"Training on {len(X_train)} samples, validating on {len(X_val)} samples")
-        
+
+        # Training loop with DataLoader
         for epoch in range(num_epochs):
             model.train()
-            
-            # Create batches
-            n_batches = (len(X_train) + batch_size - 1) // batch_size
             epoch_loss = 0
             epoch_grad_norm = 0
+            n_batches = 0
             
-            for batch_idx in range(n_batches):
-                start_idx = batch_idx * batch_size
-                end_idx = min((batch_idx + 1) * batch_size, len(X_train))
-                
-                X_batch = X_train[start_idx:end_idx]
-                T_batch = T_train[start_idx:end_idx]
-                E_batch = E_train[start_idx:end_idx]
+            for batch_data in train_loader:
+                X_batch, T_batch, E_batch = batch_data
                 
                 # Forward pass
                 risk_scores = model(X_batch)
                 
-                # Cox loss
+                # Cox loss (elastic net penalty already in model)
                 loss = model.cox_loss(risk_scores, T_batch, E_batch)
-                
-                # Add elastic net penalty (already in model)
-                loss = loss  # Model handles regularization internally
                 
                 # Backward pass
                 optimizer.zero_grad()
@@ -223,6 +294,7 @@ class AlphaInvestigator:
                 optimizer.step()
                 
                 epoch_loss += loss.item()
+                n_batches += 1
             
             # Calculate epoch metrics
             avg_loss = epoch_loss / n_batches
@@ -232,14 +304,29 @@ class AlphaInvestigator:
             
             # Validation
             model.eval()
+            all_val_risks = []
+            all_val_T = []
+            all_val_E = []
+            
             with torch.no_grad():
-                val_risks = model(X_val)
-                val_c_index = concordance_index(
-                    T_val.cpu().numpy(),
-                    -val_risks.cpu().numpy().flatten(),
-                    E_val.cpu().numpy()
-                )
-                val_c_indices.append(val_c_index)
+                for batch_data in val_loader:
+                    X_batch, T_batch, E_batch = batch_data
+                    val_risks = model(X_batch)
+                    all_val_risks.append(val_risks)
+                    all_val_T.append(T_batch)
+                    all_val_E.append(E_batch)
+            
+            # Concatenate all validation batches
+            all_val_risks = torch.cat(all_val_risks)
+            all_val_T = torch.cat(all_val_T)
+            all_val_E = torch.cat(all_val_E)
+            
+            val_c_index = concordance_index(
+                all_val_T.cpu().numpy(),
+                -all_val_risks.cpu().numpy().flatten(),
+                all_val_E.cpu().numpy()
+            )
+            val_c_indices.append(val_c_index)
             
             # Log every 10 epochs
             if (epoch + 1) % 10 == 0:
@@ -260,7 +347,7 @@ class AlphaInvestigator:
                 if patience_counter >= patience:
                     logger.info(f"Early stopping at epoch {epoch+1}")
                     break
-        
+
         # Load best model
         model.load_state_dict(best_state)
         
