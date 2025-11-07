@@ -488,7 +488,7 @@ def main():
     
     logger.info(f"\n✅ Phase 1 complete! Results saved to: {args.output_dir}")
     logger.info("\nNext steps:")
-    logger.info("1. Run: python scripts/analyze_alpha_results.py --results_dir {}").format(args.output_dir))
+    logger.info("1. Run: python scripts/analyze_alpha_results.py --results_dir {}".format(args.output_dir))
     logger.info("2. Review visualizations and summary report")
     logger.info("3. Decide on best alpha value for Phase 2")
 
