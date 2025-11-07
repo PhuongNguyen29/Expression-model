@@ -23,23 +23,23 @@ from typing import Optional, List, Tuple
 import numpy as np
 
 
-# def l1_penalty(model: nn.Module, exclude_bias: bool = True) -> torch.Tensor:
-#     """Compute L1 penalty for model parameters.
+def l1_penalty(model: nn.Module, exclude_bias: bool = True) -> torch.Tensor:
+    """Compute L1 penalty for model parameters.
 
-#     Args:
-#         model (nn.Module): Neural network model.
-#         weight_decay (float): L1 regularization strength.
-#         exclude_bias (bool): Whether to exclude bias terms from penalty.
+    Args:
+        model (nn.Module): Neural network model.
+        weight_decay (float): L1 regularization strength.
+        exclude_bias (bool): Whether to exclude bias terms from penalty.
 
-#     Returns:
-#         torch.Tensor: Computed L1 penalty.
-#     """
-#     l1_norm = 0.0
-#     for name, param in model.named_parameters():
-#         if exclude_bias and 'bias' in name:
-#             continue
-#         l1_norm += torch.sum(torch.abs(param))
-#     return l1_norm  
+    Returns:
+        torch.Tensor: Computed L1 penalty.
+    """
+    l1_norm = 0.0
+    for name, param in model.named_parameters():
+        if exclude_bias and 'bias' in name:
+            continue
+        l1_norm += torch.sum(torch.abs(param))
+    return l1_norm  
 
 def group_lasso_penalty(
     model: nn.Module,
