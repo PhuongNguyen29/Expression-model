@@ -23,23 +23,94 @@ from typing import Optional, List, Tuple
 import numpy as np
 
 
-def l1_penalty(model: nn.Module, exclude_bias: bool = True) -> torch.Tensor:
-    """Compute L1 penalty for model parameters.
+# def l1_penalty(model: nn.Module, exclude_bias: bool = True) -> torch.Tensor:
+#     """Compute L1 penalty for model parameters.
 
-    Args:
-        model (nn.Module): Neural network model.
-        weight_decay (float): L1 regularization strength.
-        exclude_bias (bool): Whether to exclude bias terms from penalty.
+#     Args:
+#         model (nn.Module): Neural network model.
+#         weight_decay (float): L1 regularization strength.
+#         exclude_bias (bool): Whether to exclude bias terms from penalty.
 
-    Returns:
-        torch.Tensor: Computed L1 penalty.
+#     Returns:
+#         torch.Tensor: Computed L1 penalty.
+#     """
+#     l1_norm = 0.0
+#     for name, param in model.named_parameters():
+#         if exclude_bias and 'bias' in name:
+#             continue
+#         l1_norm += torch.sum(torch.abs(param))
+#     return l1_norm  
+
+def group_lasso_penalty(
+    model: nn.Module,
+    alpha: float,
+    l2_ratio: float = 0.3,
+    exclude_bias: bool = True,
+    first_layer_only: bool = True
+) -> torch.Tensor:
     """
-    l1_norm = 0.0
+    Group Lasso regularization for gene-level sparsity.
+    
+    Groups all connections from each input feature (gene) together.
+    Penalty = alpha * [(1-l2_ratio) * sum(||gene_i||_2) + l2_ratio * ||W||_F^2]
+    
+    Based on:
+    - Yuan & Lin (2006). "Model selection and estimation in regression 
+      with grouped variables." JRSS-B.
+    - Simon et al. (2013). "A sparse-group lasso." J Comp Graph Stat.
+    
+    Args:
+        model: Neural network model
+        alpha: Overall regularization strength
+        l2_ratio: Mix with L2 for stability (0=pure group lasso, 1=pure L2)
+        exclude_bias: Whether to exclude bias terms
+        first_layer_only: Apply only to first layer (input→hidden)
+        
+    Returns:
+        Group Lasso penalty term
+        
+    Note:
+        For a weight matrix W of shape [hidden_dim, input_dim]:
+        - Each column represents one input feature (gene)
+        - Group Lasso penalty = sum over genes( ||column_i||_2 )
+        - This forces entire genes to zero, not just individual weights
+    """
+    penalty = 0.0
+    layer_count = 0
+    
     for name, param in model.named_parameters():
+        # Skip bias if requested
         if exclude_bias and 'bias' in name:
             continue
-        l1_norm += torch.sum(torch.abs(param))
-    return l1_norm  
+            
+        # Only apply to weight matrices
+        if 'weight' not in name:
+            continue
+            
+        # If first_layer_only, skip after first layer
+        if first_layer_only and layer_count > 0:
+            break
+            
+        if 'weight' in name:
+            # param shape: [output_dim, input_dim] e.g., [256, 308]
+            # We want to group by input features (genes) = columns
+            
+            # Compute L2 norm for each input feature's group
+            # dim=0 means we sum over output dimension (hidden units)
+            gene_group_norms = torch.norm(param, p=2, dim=0)  # Shape: [input_dim]
+            
+            # Group Lasso penalty: sum of group norms
+            group_penalty = torch.sum(gene_group_norms)
+            
+            # L2 penalty for stability (Frobenius norm squared)
+            l2_penalty = torch.sum(param ** 2)
+            
+            # Combined penalty
+            penalty += alpha * ((1 - l2_ratio) * group_penalty + l2_ratio * l2_penalty)
+            
+            layer_count += 1
+    
+    return penalty
 
 def l2_penalty(model: nn.Module, exclude_bias: bool = True) -> torch.Tensor:
     """Compute L2 penalty for model parameters.
@@ -79,8 +150,8 @@ def elastic_net_penalty(
     assert alpha >= 0.0, "alpha must be non-negative"
     l1_norm = l1_penalty(model, exclude_bias)
     l2_norm = l2_penalty(model, exclude_bias)
-    elastic_penlaty = alpha * (l1_ratio * l1_norm + (1 - l1_ratio) * l2_norm)
-    return elastic_penlaty
+    elastic_penaty = alpha * (l1_ratio * l1_norm + (1 - l1_ratio) * l2_norm)
+    return elastic_penaty
 
 def get_feature_importance(
     model: nn.Module, 

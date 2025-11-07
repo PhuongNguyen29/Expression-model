@@ -8,7 +8,7 @@ import logging
 from lifelines.utils import concordance_index 
 
 from src.models.deepsurv import DeepSurv, CoxPHLoss
-from src.utils.regularization import elastic_net_penalty, get_feature_importance, count_zero_weights
+from src.utils.regularization import group_lasso_penalty, elastic_net_penalty, get_feature_importance, count_zero_weights
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,18 @@ class ElasticDeepSurv(DeepSurv):
         cox_loss = cox_criterion(log_hazards, times, events)
 
         # Compute Elastic Net penalty
-        penalty = elastic_net_penalty(model = self, 
-                                      l1_ratio = self.l1_ratio, 
-                                      alpha = self.alpha,
-                                      exclude_bias = True)
+        # penalty = elastic_net_penalty(model = self, 
+        #                               l1_ratio = self.l1_ratio, 
+        #                               alpha = self.alpha,
+        #                               exclude_bias = True)
+        
+        penalty = group_lasso_penalty(
+            model=self,
+            alpha=self.alpha,
+            l2_ratio=1 - self.l1_ratio,  # Convert: l1_ratio → group_ratio
+            exclude_bias=True,
+            first_layer_only=True
+        )
 
         # Combine losses
         total_loss = cox_loss + penalty
