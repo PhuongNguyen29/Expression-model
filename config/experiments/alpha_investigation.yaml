@@ -9,22 +9,22 @@ project:
 
 # Dataset configuration - using consensus 308 genes
 dataset:
-  name: "consensus_308"
-  
+  name: "biomarker"
+
   # File names
   tcga_expression: "tcga_consensus_308.csv"
   orien_expression: "orien_consensus_308.csv"
   tcga_survival: "surv_tcga.csv"
   orien_survival: "surv_orien_update.csv"
-  
+
   # Processing
   use_common_genes: true
   use_consensus_genes: true
   consensus_gene_file: "consensus_genes_308.txt"
-  
+
   # Standardization (critical for neural networks)
   standardize: true
-  min_variance_percentile: 0  # No additional filtering, keep all 308 genes
+  min_variance_percentile: 0 # No additional filtering, keep all 308 genes
 
 # Paths
 paths:
@@ -35,39 +35,39 @@ paths:
 # Model configuration - fixed for investigation
 model:
   name: "elastic_deepsurv"
-  
+
   # Architecture - using TCGA best from your results
   hidden_layers: [256, 64]
   dropout: 0.3
   activation: "relu"
   batch_norm: true
-  
+
   # Regularization - THIS IS WHAT WE'RE TESTING
   # Alpha values will be set by the investigation script
-  alpha: 0.1  # Placeholder, overridden by script
-  l1_ratio: 0.7  # Fixed at your current best
-  
+  alpha: 0.1 # Placeholder, overridden by script
+  l1_ratio: 0.7 # Fixed at your current best
+
   # Weight initialization
   weight_init: "kaiming_uniform"
 
 # Training configuration
 training:
   # Reduced epochs for faster iteration in Phase 1
-  num_epochs: 100  # vs 500 in production
-  
+  num_epochs: 100 # vs 500 in production
+
   batch_size: 32
-  learning_rate: 0.000337  # Your TCGA best
-  
+  learning_rate: 0.000337 # Your TCGA best
+
   # Optimizer
   optimizer: "adam"
-  weight_decay: 0.0  # Using elastic net instead
-  
+  weight_decay: 0.0 # Using elastic net instead
+
   # Early stopping
   early_stopping:
-    patience: 20  # Reduced for investigation
+    patience: 20 # Reduced for investigation
     min_delta: 0.0001
     monitor: "val_c_index"
-  
+
   # Gradient clipping (important for stability)
   gradient_clip_norm: 1.0
 
@@ -75,11 +75,11 @@ training:
 evaluation:
   # Primary metric
   primary_metric: "c_index"
-  
+
   # Split configuration
   train_val_split: 0.8
   stratify_by_event: true
-  
+
   # Metrics to track
   metrics:
     - "c_index"
@@ -91,16 +91,16 @@ evaluation:
 investigation:
   # Alpha values to test (will be set by script)
   alpha_values: [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-  
+
   # Which cohort to use for Phase 1
-  cohort: "tcga"  # Faster with 339 samples vs 1112
-  
+  cohort: "tcga" # Faster with 339 samples vs 1112
+
   # Number of random seeds per alpha (for stability check)
-  num_seeds: 1  # Increase to 3-5 in Phase 2 if needed
-  
+  num_seeds: 1 # Increase to 3-5 in Phase 2 if needed
+
   # Feature importance extraction method
-  importance_method: "l1_norm"  # L1 norm of first layer weights
-  
+  importance_method: "l1_norm" # L1 norm of first layer weights
+
   # Sparsity thresholds
   sparsity_thresholds: [1e-4, 1e-3, 1e-2]
 
@@ -114,6 +114,6 @@ logging:
 
 # Compute
 compute:
-  device: "cuda"  # Will auto-detect
+  device: "cuda" # Will auto-detect
   num_workers: 4
   mixed_precision: false
