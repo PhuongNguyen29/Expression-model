@@ -273,7 +273,7 @@ class AlphaInvestigator:
                 risk_scores = model(X_batch)
                 
                 # Cox loss (elastic net penalty already in model)
-                loss = model.cox_loss(risk_scores, T_batch, E_batch)
+                loss = model.compute_loss(risk_scores, T_batch, E_batch)
                 
                 # Backward pass
                 optimizer.zero_grad()

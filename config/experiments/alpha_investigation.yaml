@@ -18,7 +18,7 @@ dataset:
   orien_survival: "surv_orien_update.csv"
 
   # Processing
-  use_common_genes: true
+  use_common_genes: false
   use_consensus_genes: true
   consensus_gene_file: "consensus_genes_308.txt"
 
