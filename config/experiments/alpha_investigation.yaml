@@ -12,8 +12,8 @@ dataset:
   name: "biomarker"
 
   # File names
-  tcga_expression: "tcga_consensus_308.csv"
-  orien_expression: "orien_consensus_308.csv"
+  tcga_expression: "tcga_batch_corrected_2sv.csv"
+  orien_expression: "orien_batch_corrected.csv"
   tcga_survival: "surv_tcga.csv"
   orien_survival: "surv_orien_update.csv"
 
