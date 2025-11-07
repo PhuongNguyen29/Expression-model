@@ -9,6 +9,7 @@ import torch
 from torch.optim import Optimizer
 from typing import Callable, Optional
 from .proximal_operators import ProximalOperator
+import numpy as np
 
 
 class ProximalGradientDescent(Optimizer):
