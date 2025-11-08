@@ -229,16 +229,20 @@ class AlphaInvestigator:
         # Stratified split using enhanced bins (80/20 train/val)
         from sklearn.model_selection import train_test_split
 
-        train_idx, val_idx = train_test_split(
-            np.arange(len(self.X)),
-            test_size=0.2,
-            stratify=strat_bins,  # Use enhanced stratification
-            random_state=self.seed
-        )
+        # train_idx, val_idx = train_test_split(
+        #     np.arange(len(self.X)),
+        #     test_size=0.2,
+        #     stratify=strat_bins,  # Use enhanced stratification
+        #     random_state=self.seed
+        # )
 
-        X_train, X_val = self.X[train_idx], self.X[val_idx]
-        T_train, T_val = self.T[train_idx], self.T[val_idx]
-        E_train, E_val = self.E[train_idx], self.E[val_idx]
+        # X_train, X_val = self.X[train_idx], self.X[val_idx]
+        # T_train, T_val = self.T[train_idx], self.T[val_idx]
+        # E_train, E_val = self.E[train_idx], self.E[val_idx]
+        
+        X_train = self.X  # Use ALL samples
+        T_train = self.T  # Use ALL samples
+        E_train = self.E  # Use ALL samples
 
         # Log split statistics
         logger.info(f"Training on {len(X_train)} samples, validating on {len(X_val)} samples")
