@@ -52,8 +52,8 @@ class ProximalGradientDescent(Optimizer):
         """
         Performs a single optimization step.
         
-        Args:
-            closure: A closure that reevaluates the model and returns the loss
+        CRITICAL: Proximal operator applied ONLY to first weight matrix (input layer)
+        for gene-level sparsity. Based on Feng et al. (2019).
         """
         loss = None
         if closure is not None:
@@ -61,6 +61,8 @@ class ProximalGradientDescent(Optimizer):
                 loss = closure()
         
         for group in self.param_groups:
+            weight_matrix_count = 0  # Track weight matrices ONLY
+            
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -80,7 +82,8 @@ class ProximalGradientDescent(Optimizer):
                 else:
                     p.data.add_(grad, alpha=-group['lr'])
                 
-                # Proximal operator step (induces sparsity)
+                # Proximal operator step - ONLY on first weight matrix
+                # Applies to input→hidden layer for gene-level sparsity
                 if self.prox_operator is not None and p.dim() >= 2:
                     if weight_matrix_count == 0:  # First layer only
                         p.data = self.prox_operator.apply(p.data, dim=0)
@@ -126,8 +129,6 @@ class AcceleratedProximalGradient(Optimizer):
         t_new = (1 + np.sqrt(1 + 4 * ((self.k - 1) ** 2))) / 2
         
         for group in self.param_groups:
-            weight_matrix_count = 0  # Track weight matrices
-            
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -136,7 +137,7 @@ class AcceleratedProximalGradient(Optimizer):
                 
                 # Initialize
                 if len(state) == 0:
-                    state['y'] = p.data.clone()  # Momentum point
+                    state['y'] = p.data.clone()
                     state['x_old'] = p.data.clone()
                     state['t_old'] = 1.0
                 
@@ -147,13 +148,9 @@ class AcceleratedProximalGradient(Optimizer):
                 # Gradient step at momentum point
                 y.add_(p.grad.data, alpha=-group['lr'])
                 
-                # Proximal step - ONLY on first weight matrix
+                # Proximal step
                 if self.prox_operator is not None and p.dim() >= 2:
-                    if weight_matrix_count == 0:  # First layer only
-                        x_new = self.prox_operator.apply(y.clone(), dim=0)
-                    else:
-                        x_new = y.clone()
-                    weight_matrix_count += 1
+                    x_new = self.prox_operator.apply(y.clone(), dim=0)
                 else:
                     x_new = y.clone()
                 
