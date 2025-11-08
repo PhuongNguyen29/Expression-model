@@ -132,7 +132,7 @@ class AlphaInvestigator:
         # Alpha values to test (logarithmically spaced)
         # Based on Cox elastic net literature (Simon et al. 2011)
         # self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-        self.lambda_values = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2]
+        self.lambda_values = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0]
         self.alpha_values = self.lambda_values
         
         logger.info(f"Testing {len(self.alpha_values)} alpha values: {self.alpha_values}")
@@ -343,14 +343,48 @@ class AlphaInvestigator:
             )
             val_c_indices.append(val_c_index)
             
-            # Log every 10 epochs
             if (epoch + 1) % 10 == 0:
-                logger.info(
-                    f"Epoch {epoch+1}/{num_epochs} | "
-                    f"Loss: {avg_loss:.4f} | "
-                    f"Val C-index: {val_c_index:.4f} | "
-                    f"Grad norm: {avg_grad_norm:.4f}"
-                )
+                # Get first layer weights
+                first_layer_weight = None
+                for name, param in model.named_parameters():
+                    if 'fc0.weight' in name:
+                        first_layer_weight = param.data
+                        break
+                
+                if first_layer_weight is not None:
+                    with torch.no_grad():
+                        # Gene-level norms (columns)
+                        gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
+                        zero_genes = (gene_norms < 1e-4).sum().item()
+                        active_genes = len(gene_norms) - zero_genes
+                        
+                        # More detailed diagnostics
+                        logger.info(
+                            f"  [Epoch {epoch+1}/{num_epochs}] "
+                            f"Val C-index: {val_c_index:.4f} | "
+                            f"Loss: {avg_loss:.4f} | "
+                            f"Grad: {avg_grad_norm:.4f}"
+                        )
+                        logger.info(
+                            f"    Gene norms: "
+                            f"min={gene_norms.min():.6f}, "
+                            f"max={gene_norms.max():.6f}, "
+                            f"mean={gene_norms.mean():.6f}, "
+                            f"median={gene_norms.median():.6f}"
+                        )
+                        logger.info(
+                            f"    Sparsity: {zero_genes}/{len(gene_norms)} genes zeroed "
+                            f"({100*zero_genes/len(gene_norms):.1f}%) | "
+                            f"Active: {active_genes}"
+                        )
+                else:
+                    # Regular logging if first layer not found
+                    logger.info(
+                        f"  Epoch {epoch+1}/{num_epochs} | "
+                        f"Loss: {avg_loss:.4f} | "
+                        f"Val C-index: {val_c_index:.4f} | "
+                        f"Grad norm: {avg_grad_norm:.4f}"
+                    )
             
             # Early stopping
             if val_c_index > best_c_index:

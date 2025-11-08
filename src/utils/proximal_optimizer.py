@@ -81,10 +81,10 @@ class ProximalGradientDescent(Optimizer):
                     p.data.add_(grad, alpha=-group['lr'])
                 
                 # Proximal operator step (induces sparsity)
-                if self.prox_operator is not None:
-                    # Apply only to weight matrices, not biases
-                    if p.dim() >= 2:  # Weight matrix
+                if self.prox_operator is not None and p.dim() >= 2:
+                    if weight_matrix_count == 0:  # First layer only
                         p.data = self.prox_operator.apply(p.data, dim=0)
+                    weight_matrix_count += 1
         
         return loss
 
@@ -126,6 +126,8 @@ class AcceleratedProximalGradient(Optimizer):
         t_new = (1 + np.sqrt(1 + 4 * ((self.k - 1) ** 2))) / 2
         
         for group in self.param_groups:
+            weight_matrix_count = 0  # Track weight matrices
+            
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -145,9 +147,13 @@ class AcceleratedProximalGradient(Optimizer):
                 # Gradient step at momentum point
                 y.add_(p.grad.data, alpha=-group['lr'])
                 
-                # Proximal step
+                # Proximal step - ONLY on first weight matrix
                 if self.prox_operator is not None and p.dim() >= 2:
-                    x_new = self.prox_operator.apply(y.clone(), dim=0)
+                    if weight_matrix_count == 0:  # First layer only
+                        x_new = self.prox_operator.apply(y.clone(), dim=0)
+                    else:
+                        x_new = y.clone()
+                    weight_matrix_count += 1
                 else:
                     x_new = y.clone()
                 
