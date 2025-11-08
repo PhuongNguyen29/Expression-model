@@ -189,12 +189,17 @@ class FinalModelTrainer:
         gradient_norms = []
         gene_sparsity_history = []
         
+        train_losses = []
+        gradient_norms = []
+        gene_sparsity_history = []
+
+        # Early stopping variables
         best_loss = float('inf')
         patience_counter = 0
         patience = 20
         best_model_state = None
+        best_epoch = 0
 
-        
         # Training loop
         for epoch in range(num_epochs):
             model.train()
@@ -239,9 +244,24 @@ class FinalModelTrainer:
             train_losses.append(avg_loss)
             gradient_norms.append(avg_grad_norm)
             
-            # ADD EARLY STOPPING CHECK (like grid search)
-            if avg_loss < best_loss:
+            # Check gene collapse EVERY epoch
+            first_layer_weight = None
+            for name, param in model.named_parameters():
+                if 'fc0.weight' in name:
+                    first_layer_weight = param.data
+                    break
+            
+            current_active_genes = 0
+            if first_layer_weight is not None:
+                with torch.no_grad():
+                    gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
+                    zero_genes = (gene_norms < 1e-4).sum().item()
+                    current_active_genes = len(gene_norms) - zero_genes
+            
+            # Early stopping: Only save if BOTH loss improved AND genes not collapsed
+            if avg_loss < best_loss and current_active_genes >= 250:
                 best_loss = avg_loss
+                best_epoch = epoch + 1
                 patience_counter = 0
                 best_model_state = model.state_dict().copy()
             else:
@@ -249,46 +269,50 @@ class FinalModelTrainer:
             
             # Log every 10 epochs
             if (epoch + 1) % 10 == 0:
-                # Get gene-level sparsity
-                first_layer_weight = None
-                for name, param in model.named_parameters():
-                    if 'fc0.weight' in name:
-                        first_layer_weight = param.data
-                        break
+                logger.info(
+                    f"  [Epoch {epoch+1}/{num_epochs}] "
+                    f"Loss: {avg_loss:.4f} | "
+                    f"Grad: {avg_grad_norm:.4f} | "
+                    f"Active genes: {current_active_genes}/308 | "
+                    f"Patience: {patience_counter}/{patience}"
+                )
                 
+                # Store sparsity history for logging
                 if first_layer_weight is not None:
-                    with torch.no_grad():
-                        gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
-                        zero_genes = (gene_norms < 1e-4).sum().item()
-                        active_genes = len(gene_norms) - zero_genes
-                        
-                        gene_sparsity_history.append({
-                            'epoch': epoch + 1,
-                            'zero_genes': zero_genes,
-                            'active_genes': active_genes,
-                            'sparsity_pct': 100 * zero_genes / len(gene_norms)
-                        })
-                        
-                        logger.info(
-                            f"  [Epoch {epoch+1}/{num_epochs}] "
-                            f"Loss: {avg_loss:.4f} | "
-                            f"Grad: {avg_grad_norm:.4f} | "
-                            f"Active genes: {active_genes}/{len(gene_norms)} | "
-                            f"Patience: {patience_counter}/{patience}"
-                        )
+                    gene_sparsity_history.append({
+                        'epoch': epoch + 1,
+                        'zero_genes': zero_genes,
+                        'active_genes': current_active_genes,
+                        'sparsity_pct': 100 * zero_genes / len(gene_norms)
+                    })
             
-            # CHECK FOR EARLY STOPPING
+            # Check for early stopping
             if patience_counter >= patience:
                 logger.info(f"\n🛑 Early stopping triggered at epoch {epoch+1}")
-                logger.info(f"Best training loss: {best_loss:.4f}")
+                logger.info(f"Best model from epoch {best_epoch} with loss: {best_loss:.4f}")
                 break
-        
+
+        # RESTORE BEST MODEL
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
-            logger.info(f"\n✅ Restored model from best epoch (loss: {best_loss:.4f})")
+            logger.info(f"\n✅ Restored model from epoch {best_epoch} (loss: {best_loss:.4f})")
+            
+            # Verify restored model has active genes
+            first_layer_weight = None
+            for name, param in model.named_parameters():
+                if 'fc0.weight' in name:
+                    first_layer_weight = param.data
+                    break
+            
+            if first_layer_weight is not None:
+                with torch.no_grad():
+                    gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
+                    zero_genes = (gene_norms < 1e-4).sum().item()
+                    active_genes = len(gene_norms) - zero_genes
+                    logger.info(f"   Verified: {active_genes}/308 active genes in restored model")
+                    logger.info(f"   Gene norms: min={gene_norms.min():.6f}, max={gene_norms.max():.6f}, mean={gene_norms.mean():.6f}")
         else:
-            logger.warning("No best model state saved - using final epoch model")
-        
+            logger.warning("⚠️  No best model state saved - using final epoch model")
         # Save final model
         model_path = self.output_dir / 'final_model.pth'
         torch.save({
