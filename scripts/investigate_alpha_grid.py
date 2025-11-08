@@ -132,11 +132,14 @@ class AlphaInvestigator:
         # Alpha values to test (logarithmically spaced)
         # Based on Cox elastic net literature (Simon et al. 2011)
         # self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-        self.lambda_values = [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.002, 0.003]
+        self.lambda_values = [0.00005, 0.0001, 0.0005, 0.001, 0.002, 0.003]
+        self.l1_ratio_values = [0.3, 0.5, 0.7, 0.9, 1.0]
         self.alpha_values = self.lambda_values
         
-        logger.info(f"Testing {len(self.alpha_values)} alpha values: {self.alpha_values}")
-        
+        logger.info(f"Testing {len(self.lambda_values)} lambda values: {self.lambda_values}")
+        logger.info(f"Testing {len(self.l1_ratio_values)} l1_ratio values: {self.l1_ratio_values}")
+        logger.info(f"Total combinations: {len(self.lambda_values) * len(self.l1_ratio_values)}")
+            
     def _set_seeds(self):
         """Set random seeds for reproducibility."""
         torch.manual_seed(self.seed)
@@ -169,51 +172,52 @@ class AlphaInvestigator:
         logger.info(f"Features (genes): {self.n_features}")
         logger.info(f"Events: {self.E.sum().item()}/{len(self.E)} ({100*self.E.mean().item():.1f}%)")
         logger.info("="*60)
-    
-    def train_with_fixed_alpha(self, alpha: float, fold: int = 0) -> dict:
+
+    def train_with_fixed_params(self, lambda_val: float, l1_ratio: float, fold: int = 0) -> dict:
         """
-        Train model with fixed alpha value.
+        Train model with fixed lambda and l1_ratio values.
         
         Args:
-            alpha: Fixed alpha value to test
+            lambda_val: Lambda value (proximal operator strength)
+            l1_ratio: L1 ratio (Group Lasso vs Ridge mix)
             fold: Cross-validation fold number
             
         Returns:
             dict with training results and metrics
         """
         logger.info(f"\n{'='*60}")
-        logger.info(f"Training with alpha={alpha:.4f}")
+        logger.info(f"Training with lambda={lambda_val:.5f}, l1_ratio={l1_ratio:.2f}")
         logger.info(f"{'='*60}")
         
-        # Fixed hyperparameters from your current best configuration
+        # Fixed hyperparameters
         config = {
             'n_features': self.n_features,
-            'hidden_sizes': [256, 64],  # Your TCGA best architecture
+            'hidden_sizes': [256, 64],
             'dropout': 0.3,
             'activation': 'relu',
             'batch_norm': True,
-            'alpha': alpha,
-            'l1_ratio': 0.7,  # Your current best
+            'alpha': lambda_val,  # This is just for model initialization
+            'l1_ratio': l1_ratio,  # UPDATED: use the parameter
         }
         
         # Training parameters
-        learning_rate = 0.000337  # Your TCGA best
-        num_epochs = 100  # Reduced from 500 for faster iteration
+        learning_rate = 0.000337
+        num_epochs = 100
         batch_size = 32
-        patience = 20  # Early stopping
+        patience = 20
         
         # Create model
         model = ElasticDeepSurv(**config).to(self.device)
-        lambda_value = alpha  # Actually using lambda grid now
-
+        
+        # Create optimizer with specified lambda and l1_ratio
         optimizer = create_proximal_optimizer(
             model.parameters(),
             optimizer_type='fista',
             lr=learning_rate,
             alpha=0.1,  # Dummy value, not used
-            l1_ratio=config['l1_ratio'],
+            l1_ratio=l1_ratio,  # UPDATED: use the parameter
             use_group_lasso=True,
-            lambda_scale=lambda_value  
+            lambda_scale=lambda_val  # Direct lambda control
         )
         # Create enhanced stratification bins (event + time)
         strat_bins = create_survival_stratification_bins(
@@ -417,7 +421,8 @@ class AlphaInvestigator:
             )
         
         results = {
-            'alpha': alpha,
+            'lambda': lambda_val,  # UPDATED: store lambda
+            'l1_ratio': l1_ratio,
             'fold': fold,
             'config': config,
             'final_val_c_index': final_c_index,
@@ -440,7 +445,7 @@ class AlphaInvestigator:
         }
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"Results for alpha={alpha:.4f}:")
+        logger.info(f"Results for lambda={lambda_val:.5f}, l1_ratio={l1_ratio:.2f}:")
         logger.info(f"  Final C-index: {final_c_index:.4f}")
         logger.info(f"  Sparsity (< 1e-4): {sparsity_metrics['sparsity_1e-4']:.2f}%")
         logger.info(f"  Sparsity (< 1e-3): {sparsity_metrics['sparsity_1e-3']:.2f}%")
@@ -518,22 +523,26 @@ class AlphaInvestigator:
         # Store all results
         all_results = []
         
-        # Test each alpha value
-        for alpha in self.alpha_values:
-            try:
-                results = self.train_with_fixed_alpha(alpha)
-                all_results.append(results)
-                
-                # Save individual result
-                result_file = self.output_dir / f"alpha_{alpha:.4f}_results.json"
-                with open(result_file, 'w') as f:
-                    # Convert numpy types to Python types for JSON
-                    results_serializable = self._make_json_serializable(results)
-                    json.dump(results_serializable, f, indent=2)
-                
-            except Exception as e:
-                logger.error(f"Error with alpha={alpha}: {str(e)}")
-                continue
+        for l1_ratio in self.l1_ratio_values:
+            for lambda_val in self.lambda_values:
+                try:
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"Training with lambda={lambda_val:.5f}, l1_ratio={l1_ratio}")
+                    logger.info(f"{'='*60}")
+                    
+                    # Train with this (lambda, l1_ratio) combination
+                    results = self.train_with_fixed_params(lambda_val, l1_ratio)
+                    all_results.append(results)
+                    
+                    # Save individual result
+                    result_file = self.output_dir / f"lambda_{lambda_val:.5f}_l1ratio_{l1_ratio:.2f}_results.json"
+                    with open(result_file, 'w') as f:
+                        results_serializable = self._make_json_serializable(results)
+                        json.dump(results_serializable, f, indent=2)
+                    
+                except Exception as e:
+                    logger.error(f"Error with lambda={lambda_val}, l1_ratio={l1_ratio}: {str(e)}")
+                    continue
         
         # Save summary
         self._save_summary(all_results)
@@ -568,7 +577,8 @@ class AlphaInvestigator:
         
         for result in all_results:
             summary_data.append({
-                'alpha': result['alpha'],
+                'lambda': result['lambda'],        # UPDATED
+                'l1_ratio': result['l1_ratio'],    # UPDATED
                 'final_c_index': result['final_val_c_index'],
                 'best_c_index': result['best_val_c_index'],
                 'sparsity_1e-4': result['sparsity_metrics']['sparsity_1e-4'],
@@ -582,10 +592,10 @@ class AlphaInvestigator:
             })
         
         summary_df = pd.DataFrame(summary_data)
-        summary_df = summary_df.sort_values('alpha')
+        summary_df = summary_df.sort_values(['l1_ratio', 'lambda'])  # UPDATED
         
         # Save as CSV
-        summary_file = self.output_dir / "alpha_investigation_summary.csv"
+        summary_file = self.output_dir / "hyperparameter_investigation_summary.csv"
         summary_df.to_csv(summary_file, index=False)
         
         logger.info("\n" + "="*60)
