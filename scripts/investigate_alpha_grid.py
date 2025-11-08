@@ -132,8 +132,8 @@ class AlphaInvestigator:
         # Alpha values to test (logarithmically spaced)
         # Based on Cox elastic net literature (Simon et al. 2011)
         # self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-        self.lambda_values = [0.0005]
-        self.l1_ratio_values = [0.7]
+        self.lambda_values = [0.0005, 0.001, 0.002, 0.003]
+        self.l1_ratio_values = [0.3, 0.5, 0.7, 0.9, 1.0]
         self.alpha_values = self.lambda_values
         
         logger.info(f"Testing {len(self.lambda_values)} lambda values: {self.lambda_values}")
@@ -229,20 +229,16 @@ class AlphaInvestigator:
         # Stratified split using enhanced bins (80/20 train/val)
         from sklearn.model_selection import train_test_split
 
-        # train_idx, val_idx = train_test_split(
-        #     np.arange(len(self.X)),
-        #     test_size=0.2,
-        #     stratify=strat_bins,  # Use enhanced stratification
-        #     random_state=self.seed
-        # )
+        train_idx, val_idx = train_test_split(
+            np.arange(len(self.X)),
+            test_size=0.2,
+            stratify=strat_bins,  # Use enhanced stratification
+            random_state=self.seed
+        )
 
-        # X_train, X_val = self.X[train_idx], self.X[val_idx]
-        # T_train, T_val = self.T[train_idx], self.T[val_idx]
-        # E_train, E_val = self.E[train_idx], self.E[val_idx]
-        
-        X_train = self.X  # Use ALL samples
-        T_train = self.T  # Use ALL samples
-        E_train = self.E  # Use ALL samples
+        X_train, X_val = self.X[train_idx], self.X[val_idx]
+        T_train, T_val = self.T[train_idx], self.T[val_idx]
+        E_train, E_val = self.E[train_idx], self.E[val_idx]
 
         # Log split statistics
         logger.info(f"Training on {len(X_train)} samples, validating on {len(X_val)} samples")

@@ -276,15 +276,13 @@ class FinalModelTrainer:
                     f"Active genes: {current_active_genes}/308 | "
                     f"Patience: {patience_counter}/{patience}"
                 )
-                
-                # Store sparsity history for logging
-                if first_layer_weight is not None:
-                    gene_sparsity_history.append({
-                        'epoch': epoch + 1,
-                        'zero_genes': zero_genes,
-                        'active_genes': current_active_genes,
-                        'sparsity_pct': 100 * zero_genes / len(gene_norms)
-                    })
+            
+                gene_sparsity_history.append({
+                    'epoch': epoch + 1,
+                    'zero_genes': zero_genes,
+                    'active_genes': current_active_genes,
+                    'sparsity_pct': 100 * zero_genes / len(gene_norms)
+                })
             
             # Check for early stopping
             if patience_counter >= patience:
@@ -313,6 +311,7 @@ class FinalModelTrainer:
                     logger.info(f"   Gene norms: min={gene_norms.min():.6f}, max={gene_norms.max():.6f}, mean={gene_norms.mean():.6f}")
         else:
             logger.warning("⚠️  No best model state saved - using final epoch model")
+        
         # Save final model
         model_path = self.output_dir / 'final_model.pth'
         torch.save({
@@ -327,8 +326,10 @@ class FinalModelTrainer:
                 'cohort': self.cohort,
                 'n_samples': self.n_samples,
                 'n_features': self.n_features,
-                'n_epochs': num_epochs,
-                'final_loss': train_losses[-1]
+                'n_epochs': len(train_losses),
+                'best_epoch': best_epoch,
+                'final_loss': train_losses[-1],
+                'best_loss': best_loss
             }
         }, model_path)
         
