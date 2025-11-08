@@ -199,9 +199,35 @@ class FinalModelTrainer:
         patience = 20
         best_model_state = None
         best_epoch = 0
+        
+        prev_active_genes = 308
+        gene_drop_detected = False
 
         # Training loop
         for epoch in range(num_epochs):
+            first_layer_weight = None
+            for name, param in model.named_parameters():
+                if 'fc0.weight' in name:
+                    first_layer_weight = param.data
+                    break
+            
+            current_active_genes = 308
+            if first_layer_weight is not None:
+                with torch.no_grad():
+                    gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
+                    zero_genes = (gene_norms < 1e-4).sum().item()
+                    current_active_genes = len(gene_norms) - zero_genes
+            
+            # DETECT GENE DROP: If genes drop by more than 10, stop immediately
+            if current_active_genes < prev_active_genes - 10 and not gene_drop_detected:
+                logger.info(f"\n⚠️  Gene collapse detected at epoch {epoch+1}!")
+                logger.info(f"   Active genes dropped from {prev_active_genes} to {current_active_genes}")
+                logger.info(f"   Using model from epoch {epoch} (before collapse)")
+                gene_drop_detected = True
+                # Don't break - let it finish epoch for logging
+            
+            prev_active_genes = current_active_genes
+            
             model.train()
             epoch_loss = 0
             epoch_grad_norm = 0
@@ -244,28 +270,37 @@ class FinalModelTrainer:
             train_losses.append(avg_loss)
             gradient_norms.append(avg_grad_norm)
             
-            # Check gene collapse EVERY epoch
-            first_layer_weight = None
-            for name, param in model.named_parameters():
-                if 'fc0.weight' in name:
-                    first_layer_weight = param.data
-                    break
+            # # Check gene collapse EVERY epoch
+            # first_layer_weight = None
+            # for name, param in model.named_parameters():
+            #     if 'fc0.weight' in name:
+            #         first_layer_weight = param.data
+            #         break
             
-            current_active_genes = 0
-            if first_layer_weight is not None:
-                with torch.no_grad():
-                    gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
-                    zero_genes = (gene_norms < 1e-4).sum().item()
-                    current_active_genes = len(gene_norms) - zero_genes
+            # current_active_genes = 0
+            # if first_layer_weight is not None:
+            #     with torch.no_grad():
+            #         gene_norms = torch.norm(first_layer_weight, p=2, dim=0)
+            #         zero_genes = (gene_norms < 1e-4).sum().item()
+            #         current_active_genes = len(gene_norms) - zero_genes
             
-            # Early stopping: Only save if BOTH loss improved AND genes not collapsed
-            if avg_loss < best_loss and current_active_genes >= 250:
-                best_loss = avg_loss
-                best_epoch = epoch + 1
-                patience_counter = 0
-                best_model_state = model.state_dict().copy()
-            else:
-                patience_counter += 1
+            # # Early stopping: Only save if BOTH loss improved AND genes not collapsed
+            # if avg_loss < best_loss and current_active_genes >= 250:
+            #     best_loss = avg_loss
+            #     best_epoch = epoch + 1
+            #     patience_counter = 0
+            #     best_model_state = model.state_dict().copy()
+            # else:
+            #     patience_counter += 1
+            
+            if not gene_drop_detected:
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    best_epoch = epoch + 1
+                    patience_counter = 0
+                    best_model_state = model.state_dict().copy()
+                else:
+                    patience_counter += 1
             
             # Log every 10 epochs
             if (epoch + 1) % 10 == 0:
@@ -284,11 +319,21 @@ class FinalModelTrainer:
                     'sparsity_pct': 100 * zero_genes / len(gene_norms)
                 })
             
-            # Check for early stopping
+            # Early stopping: If genes collapsed, stop after this epoch
+            if gene_drop_detected:
+                logger.info(f"\n🛑 Stopping due to gene collapse")
+                break
+            
+            # Normal early stopping
             if patience_counter >= patience:
                 logger.info(f"\n🛑 Early stopping triggered at epoch {epoch+1}")
-                logger.info(f"Best model from epoch {best_epoch} with loss: {best_loss:.4f}")
                 break
+                    
+            # # Check for early stopping
+            # if patience_counter >= patience:
+            #     logger.info(f"\n🛑 Early stopping triggered at epoch {epoch+1}")
+            #     logger.info(f"Best model from epoch {best_epoch} with loss: {best_loss:.4f}")
+            #     break
 
         # RESTORE BEST MODEL
         if best_model_state is not None:
