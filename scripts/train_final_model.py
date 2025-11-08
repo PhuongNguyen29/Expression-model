@@ -189,6 +189,12 @@ class FinalModelTrainer:
         gradient_norms = []
         gene_sparsity_history = []
         
+        best_loss = float('inf')
+        patience_counter = 0
+        patience = 20
+        best_model_state = None
+
+        
         # Training loop
         for epoch in range(num_epochs):
             model.train()
@@ -233,6 +239,14 @@ class FinalModelTrainer:
             train_losses.append(avg_loss)
             gradient_norms.append(avg_grad_norm)
             
+            # ADD EARLY STOPPING CHECK (like grid search)
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                patience_counter = 0
+                best_model_state = model.state_dict().copy()
+            else:
+                patience_counter += 1
+            
             # Log every 10 epochs
             if (epoch + 1) % 10 == 0:
                 # Get gene-level sparsity
@@ -259,8 +273,21 @@ class FinalModelTrainer:
                             f"  [Epoch {epoch+1}/{num_epochs}] "
                             f"Loss: {avg_loss:.4f} | "
                             f"Grad: {avg_grad_norm:.4f} | "
-                            f"Active genes: {active_genes}/{len(gene_norms)}"
+                            f"Active genes: {active_genes}/{len(gene_norms)} | "
+                            f"Patience: {patience_counter}/{patience}"
                         )
+            
+            # CHECK FOR EARLY STOPPING
+            if patience_counter >= patience:
+                logger.info(f"\n🛑 Early stopping triggered at epoch {epoch+1}")
+                logger.info(f"Best training loss: {best_loss:.4f}")
+                break
+        
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+            logger.info(f"\n✅ Restored model from best epoch (loss: {best_loss:.4f})")
+        else:
+            logger.warning("No best model state saved - using final epoch model")
         
         # Save final model
         model_path = self.output_dir / 'final_model.pth'
