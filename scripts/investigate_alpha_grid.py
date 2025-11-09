@@ -108,7 +108,7 @@ class AlphaInvestigator:
     3. Gradient stability across alpha values
     """
     
-    def __init__(self, config_path: str, output_dir: str):
+    def __init__(self, config_path: str, output_dir: str, cohort: str = 'tcga'):
         """
         Initialize investigator.
         
@@ -135,7 +135,9 @@ class AlphaInvestigator:
         self.lambda_values = [0.0005, 0.001, 0.002, 0.003]
         self.l1_ratio_values = [0.3, 0.5, 0.7, 0.9, 1.0]
         self.alpha_values = self.lambda_values
+        self.cohort = cohort.lower()
         
+        logger.info(f"Cohort for hyperparameter search: {self.cohort.upper()}")
         logger.info(f"Testing {len(self.lambda_values)} lambda values: {self.lambda_values}")
         logger.info(f"Testing {len(self.l1_ratio_values)} l1_ratio values: {self.l1_ratio_values}")
         logger.info(f"Total combinations: {len(self.lambda_values) * len(self.l1_ratio_values)}")
@@ -157,18 +159,21 @@ class AlphaInvestigator:
         
         data = load_dataset_from_config(self.config)
         
-        # Use TCGA only for Phase 1 (faster iteration)
-        self.tcga_expr = data['tcga_expr']
-        self.surv_tcga = data['surv_tcga']
+        if self.cohort == 'tcga':
+            self.expr_data = data['tcga_expr']
+            self.surv_data = data['surv_tcga']
+        else:  # orien
+            self.expr_data = data['orien_expr']
+            self.surv_data = data['surv_orien']
         
         # Convert to tensors
-        self.X = torch.FloatTensor(self.tcga_expr.T.values).to(self.device)
-        self.T = torch.FloatTensor(self.surv_tcga['time'].values).to(self.device)
-        self.E = torch.FloatTensor(self.surv_tcga['event'].values).to(self.device)
-        
+        self.X = torch.FloatTensor(self.expr_data.T.values).to(self.device)
+        self.T = torch.FloatTensor(self.surv_data['time'].values).to(self.device)
+        self.E = torch.FloatTensor(self.surv_data['event'].values).to(self.device)
+
         self.n_features = self.X.shape[1]
         
-        logger.info(f"TCGA samples: {self.X.shape[0]}")
+        logger.info(f"Cohort samples: {self.X.shape[0]}")
         logger.info(f"Features (genes): {self.n_features}")
         logger.info(f"Events: {self.E.sum().item()}/{len(self.E)} ({100*self.E.mean().item():.1f}%)")
         logger.info("="*60)
@@ -610,6 +615,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Phase 1: Alpha Investigation')
+    
     parser.add_argument(
         '--config',
         type=str,
@@ -622,6 +628,13 @@ def main():
         default=None,
         help='Output directory (default: results/alpha_investigation_YYYYMMDD_HHMMSS)'
     )
+    parser.add_argument(
+    '--cohort',
+    type=str,
+    default='tcga',
+    choices=['tcga', 'orien'],
+    help='Cohort for hyperparameter search'
+    )
     
     args = parser.parse_args()
     
@@ -631,7 +644,7 @@ def main():
         args.output_dir = f"results/alpha_investigation_{timestamp}"
     
     # Run investigation
-    investigator = AlphaInvestigator(args.config, args.output_dir)
+    investigator = AlphaInvestigator(args.config, args.output_dir, cohort=args.cohort)
     results = investigator.run_investigation()
     
     logger.info(f"\n✅ Phase 1 complete! Results saved to: {args.output_dir}")
