@@ -408,7 +408,11 @@ class FinalModelTrainer:
         return model
     
     def calculate_c_index(self, model):
-        """Calculate concordance index on full dataset."""
+        """Calculate concordance index with detailed diagnostics."""
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Calculating C-index on {self.cohort.upper()}")
+        logger.info(f"{'='*60}")
+        
         model.eval()
         
         with torch.no_grad():
@@ -417,27 +421,97 @@ class FinalModelTrainer:
         T_np = self.T.cpu().numpy()
         E_np = self.E.cpu().numpy()
         
-        # Calculate C-index
+        # ========== ADD DIAGNOSTICS ==========
+        logger.info(f"\n{'='*60}")
+        logger.info("RISK SCORE DIAGNOSTICS")
+        logger.info(f"{'='*60}")
+        
+        # Basic statistics
+        logger.info(f"\nRisk Score Statistics:")
+        logger.info(f"  Min:    {risk_scores.min():.6f}")
+        logger.info(f"  Max:    {risk_scores.max():.6f}")
+        logger.info(f"  Mean:   {risk_scores.mean():.6f}")
+        logger.info(f"  Std:    {risk_scores.std():.6f}")
+        logger.info(f"  Range:  {risk_scores.max() - risk_scores.min():.6f}")
+        
+        # Check if all values are nearly identical
+        if risk_scores.std() < 0.01:
+            logger.warning("⚠️  WARNING: Risk scores have very low variance!")
+            logger.warning("   Model is outputting nearly identical values for all samples")
+            logger.warning("   This suggests the model failed to learn")
+        
+        # Correlation with survival time
+        from scipy.stats import spearmanr
+        corr_time, p_time = spearmanr(risk_scores, T_np)
+        logger.info(f"\nCorrelation with Survival Time:")
+        logger.info(f"  Spearman r: {corr_time:.4f} (p={p_time:.4e})")
+        if corr_time > 0:
+            logger.warning("⚠️  WARNING: Positive correlation!")
+            logger.warning("   High risk predicts LONGER survival (wrong direction!)")
+        elif abs(corr_time) < 0.1:
+            logger.warning("⚠️  WARNING: Very weak correlation!")
+            logger.warning("   Risk scores barely related to survival time")
+        
+        # Risk by event status
+        risk_events = risk_scores[E_np == 1]
+        risk_censored = risk_scores[E_np == 0]
+        
+        logger.info(f"\nRisk by Event Status:")
+        logger.info(f"  Events (n={len(risk_events)}):")
+        logger.info(f"    Mean: {risk_events.mean():.6f}, Std: {risk_events.std():.6f}")
+        logger.info(f"  Censored (n={len(risk_censored)}):")
+        logger.info(f"    Mean: {risk_censored.mean():.6f}, Std: {risk_censored.std():.6f}")
+        logger.info(f"  Difference: {risk_events.mean() - risk_censored.mean():.6f}")
+        
+        if risk_events.mean() < risk_censored.mean():
+            logger.warning("⚠️  WARNING: Events have LOWER risk than censored!")
+            logger.warning("   Model learned backwards relationship")
+        
+        # Calculate percentiles
+        percentiles = [10, 25, 50, 75, 90]
+        logger.info(f"\nRisk Score Percentiles:")
+        for p in percentiles:
+            val = np.percentile(risk_scores, p)
+            logger.info(f"  {p}th: {val:.6f}")
+        
+        # ========== ORIGINAL C-INDEX CALCULATION ==========
         concordant = 0.0
         permissible = 0.0
         
         for i in range(len(T_np)):
-            if E_np[i] == 0:  # Skip censored
+            if E_np[i] == 0:
                 continue
-            
             for j in range(len(T_np)):
-                if T_np[j] > T_np[i]:  # j survived longer
+                if T_np[j] > T_np[i]:
                     permissible += 1
-                    if risk_scores[i] > risk_scores[j]:  # Higher risk dies earlier
+                    if risk_scores[i] > risk_scores[j]:
                         concordant += 1
                     elif risk_scores[i] == risk_scores[j]:
                         concordant += 0.5
         
         c_index = concordant / permissible if permissible > 0 else 0.5
         
-        logger.info(f"\n{self.cohort.upper()} C-index: {c_index:.4f}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"{self.cohort.upper()} Training C-index: {c_index:.4f}")
+        logger.info(f"{'='*60}")
+        logger.info(f"  Concordant pairs: {concordant:.0f}")
+        logger.info(f"  Permissible pairs: {permissible:.0f}")
+        logger.info(f"  Concordance rate: {100*concordant/permissible:.1f}%")
+        
+        # ========== SAVE RISK SCORES FOR ANALYSIS ==========
+        import pandas as pd
+        risk_df = pd.DataFrame({
+            'risk_score': risk_scores,
+            'time': T_np,
+            'event': E_np
+        })
+        risk_path = self.output_dir / f'{self.cohort}_risk_scores.csv'
+        risk_df.to_csv(risk_path, index=False)
+        logger.info(f"\nRisk scores saved to: {risk_path}")
         
         return c_index
+    
+    
     def test_on_other_cohort(self, model):
         """
         Test trained model on the other cohort for bidirectional validation.
