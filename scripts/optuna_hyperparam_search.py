@@ -181,7 +181,7 @@ class ComprehensiveHyperparameterTuner:
         self.strat_bins = create_survival_stratification_bins(
             self.T.cpu().numpy(),
             self.E.cpu().numpy(),
-            n_time_bins=4
+            n_time_bins=6  # Increased from 4 to 6 for better fold homogeneity
         )
         
         logger.info(f"{self.cohort.upper()} samples: {self.n_samples}")
@@ -222,24 +222,24 @@ class ComprehensiveHyperparameterTuner:
             if n_layers == 2:
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['512-256', '512-128', '256-128', '256-64']
+                    ['256-128', '256-64', '128-64', '128-32']  # First layer ≤ 256 (not 512!)
                 )
                 params['hidden_sizes'] = [int(x) for x in architecture.split('-')]
             else:  # 3 layers
                 architecture = trial.suggest_categorical(
                     'architecture_3layer',
-                    ['512-256-128', '512-256-64', '256-128-64', '256-128-32']
+                    ['256-128-64', '256-128-32', '128-64-32']  # First layer ≤ 256 (not 512!)
                 )
                 params['hidden_sizes'] = [int(x) for x in architecture.split('-')]
             
             params['dropout'] = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
             params['batch_size'] = trial.suggest_categorical('batch_size', [48, 64])
             
-            # Weaker lambda range for ORIEN (lower event rate)
-            params['lambda_val'] = trial.suggest_float('lambda', 0.00001, 0.0005, log=True)
+            # Much weaker lambda range for ORIEN (lower event rate + boundary issue)
+            params['lambda_val'] = trial.suggest_float('lambda', 0.000001, 0.00005, log=True)
         
         # Common hyperparameters
-        params['l1_ratio'] = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7, 0.9, 1.0])
+        params['l1_ratio'] = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7])  # More Ridge, less Lasso
         params['learning_rate'] = trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True)
         params['activation'] = 'relu'  # Fixed
         params['batch_norm'] = True    # Fixed
@@ -275,6 +275,7 @@ class ComprehensiveHyperparameterTuner:
         train_sampler = StratifiedBatchSampler(
             events=E_train.cpu().numpy(),
             batch_size=params['batch_size'],
+            min_events_per_batch=3,  # Increased from 1 to 3 for more stable gradients
             shuffle=True
         )
         
