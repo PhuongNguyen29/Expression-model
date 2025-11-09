@@ -402,12 +402,11 @@ class ComprehensiveHyperparameterTuner:
         cv_scores = []
         
         for fold, (train_idx, val_idx) in enumerate(skf.split(self.X.cpu().numpy(), self.strat_bins)):
-            logger.info(f"  Fold {fold+1}/{self.n_folds}...", end=' ')
             
             try:
                 fold_c_index = self.train_fold(train_idx, val_idx, params)
                 cv_scores.append(fold_c_index)
-                logger.info(f"C-index: {fold_c_index:.4f}")
+                logger.info(f"  Fold {fold+1}/{self.n_folds}: C-index = {fold_c_index:.4f}")
                 
             except Exception as e:
                 logger.warning(f"Failed: {e}")
