@@ -132,7 +132,7 @@ class AlphaInvestigator:
         # Alpha values to test (logarithmically spaced)
         # Based on Cox elastic net literature (Simon et al. 2011)
         # self.alpha_values = [0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
-        self.lambda_values = [0.0005, 0.001, 0.002, 0.003]
+        self.lambda_values = [0.00005, 0.0001, 0.00025, 0.0005, 0.00075, 0.001]
         self.l1_ratio_values = [0.3, 0.5, 0.7, 0.9, 1.0]
         self.alpha_values = self.lambda_values
         self.cohort = cohort.lower()
