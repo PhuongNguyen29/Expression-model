@@ -136,21 +136,38 @@ class FinalModelTrainer:
         logger.info(f"Training Final Model - {self.cohort.upper()}")
         logger.info(f"{'='*60}")
         
-        # Model configuration
+        # Use cohort-specific architecture
+        if self.cohort == 'tcga':
+            hidden_sizes = [256, 64]
+            dropout = 0.3
+            learning_rate = 0.000337
+            batch_size = 32
+        else:  # orien - Trial 33 optimal
+            hidden_sizes = [128, 32]
+            dropout = 0.4
+            learning_rate = 0.000747
+            batch_size = 48
+
         model_config = {
             'n_features': self.n_features,
-            'hidden_sizes': [256, 64],
-            'dropout': 0.3,
+            'hidden_sizes': hidden_sizes,  # ← Cohort-specific
+            'dropout': dropout,
             'activation': 'relu',
             'batch_norm': True,
             'alpha': self.lambda_val,
             'l1_ratio': self.l1_ratio,
         }
-        
+                
         # Training parameters
-        learning_rate = 0.000337
-        num_epochs = 150  # More epochs since no early stopping
-        batch_size = 32
+        # Cohort-specific training parameters
+        if self.cohort == 'tcga':
+            learning_rate = 0.000337
+            batch_size = 32
+        else:  # orien - Trial 33 optimal
+            learning_rate = 0.000747
+            batch_size = 48
+
+        num_epochs = 200
         
         # Create model
         model = ElasticDeepSurv(**model_config).to(self.device)
@@ -356,12 +373,13 @@ class FinalModelTrainer:
                     logger.info(f"   Gene norms: min={gene_norms.min():.6f}, max={gene_norms.max():.6f}, mean={gene_norms.mean():.6f}")
         else:
             logger.warning("⚠️  No best model state saved - using final epoch model")
-        
+        c_index = self.calculate_c_index(model)
         # Save final model
         model_path = self.output_dir / 'final_model.pth'
         torch.save({
             'model_state_dict': model.state_dict(),
             'model_config': model_config,
+            'c_index': c_index,
             'hyperparameters': {
                 'lambda': self.lambda_val,
                 'l1_ratio': self.l1_ratio,
@@ -383,10 +401,140 @@ class FinalModelTrainer:
         # Extract and save gene importances
         self._extract_and_save_importances(model)
         
+        c_index_test = self.test_on_other_cohort(model)
         # Save training history
         self._save_training_history(train_losses, gradient_norms, gene_sparsity_history)
         
         return model
+    
+    def calculate_c_index(self, model):
+        """Calculate concordance index on full dataset."""
+        model.eval()
+        
+        with torch.no_grad():
+            risk_scores = model(self.X).squeeze().cpu().numpy()
+        
+        T_np = self.T.cpu().numpy()
+        E_np = self.E.cpu().numpy()
+        
+        # Calculate C-index
+        concordant = 0.0
+        permissible = 0.0
+        
+        for i in range(len(T_np)):
+            if E_np[i] == 0:  # Skip censored
+                continue
+            
+            for j in range(len(T_np)):
+                if T_np[j] > T_np[i]:  # j survived longer
+                    permissible += 1
+                    if risk_scores[i] > risk_scores[j]:  # Higher risk dies earlier
+                        concordant += 1
+                    elif risk_scores[i] == risk_scores[j]:
+                        concordant += 0.5
+        
+        c_index = concordant / permissible if permissible > 0 else 0.5
+        
+        logger.info(f"\n{self.cohort.upper()} C-index: {c_index:.4f}")
+        
+        return c_index
+    def test_on_other_cohort(self, model):
+        """
+        Test trained model on the other cohort for bidirectional validation.
+        
+        If trained on ORIEN → test on TCGA
+        If trained on TCGA → test on ORIEN
+        """
+        logger.info(f"\n{'='*60}")
+        logger.info("Cross-Cohort Testing")
+        logger.info(f"{'='*60}")
+        
+        # Load other cohort
+        other_cohort = 'tcga' if self.cohort == 'orien' else 'orien'
+        logger.info(f"Loading {other_cohort.upper()} for testing...")
+        
+        data = load_dataset_from_config(self.config)
+        
+        if other_cohort == 'tcga':
+            expr_data = data['tcga_expr']
+            surv_data = data['surv_tcga']
+        else:
+            expr_data = data['orien_expr']
+            surv_data = data['surv_orien']
+        
+        X_test = torch.FloatTensor(expr_data.T.values).to(self.device)
+        T_test = torch.FloatTensor(surv_data['time'].values).to(self.device)
+        E_test = torch.FloatTensor(surv_data['event'].values).to(self.device)
+        
+        logger.info(f"{other_cohort.upper()} samples: {len(X_test)}")
+        logger.info(f"Events: {E_test.sum().item()}/{len(E_test)} ({100*E_test.mean().item():.1f}%)")
+        
+        # Calculate C-index
+        model.eval()
+        with torch.no_grad():
+            risk_scores = model(X_test).squeeze().cpu().numpy()
+        
+        T_np = T_test.cpu().numpy()
+        E_np = E_test.cpu().numpy()
+        
+        concordant = 0.0
+        permissible = 0.0
+        
+        for i in range(len(T_np)):
+            if E_np[i] == 0:
+                continue
+            for j in range(len(T_np)):
+                if T_np[j] > T_np[i]:
+                    permissible += 1
+                    if risk_scores[i] > risk_scores[j]:
+                        concordant += 1
+                    elif risk_scores[i] == risk_scores[j]:
+                        concordant += 0.5
+        
+        c_index_test = concordant / permissible if permissible > 0 else 0.5
+        
+        logger.info(f"\n{self.cohort.upper()} → {other_cohort.upper()} C-index: {c_index_test:.4f}")
+        
+        # Compare to Chapter 2
+        logger.info(f"\n{'='*60}")
+        logger.info("Comparison to Chapter 2 (Cox Model)")
+        logger.info(f"{'='*60}")
+        
+        if self.cohort == 'orien':
+            cox_orien_cv = 0.639
+            logger.info(f"Cox (ORIEN CV): {cox_orien_cv:.4f}")
+            logger.info(f"Neural (ORIEN→TCGA): {c_index_test:.4f}")
+            logger.info(f"Gap: {c_index_test - cox_orien_cv:+.4f} ({100*(c_index_test - cox_orien_cv)/cox_orien_cv:+.1f}%)")
+            
+            if c_index_test >= 0.62:
+                logger.info("\n✅ Neural network competitive with Cox model!")
+            elif c_index_test >= 0.60:
+                logger.info("\n⚠️  Neural network marginally below Cox model")
+            else:
+                logger.info("\n❌ Neural network underperforms Cox model")
+        else:
+            cox_tcga_cv = 0.678
+            logger.info(f"Cox (TCGA CV): {cox_tcga_cv:.4f}")
+            logger.info(f"Neural (TCGA→ORIEN): {c_index_test:.4f}")
+            logger.info(f"Gap: {c_index_test - cox_tcga_cv:+.4f}")
+        
+        # Save test results
+        test_results = {
+            'training_cohort': self.cohort,
+            'test_cohort': other_cohort,
+            'test_c_index': float(c_index_test),
+            'test_samples': len(X_test),
+            'test_events': int(E_test.sum().item())
+        }
+        
+        results_path = self.output_dir / 'cross_cohort_results.json'
+        with open(results_path, 'w') as f:
+            json.dump(test_results, f, indent=2)
+        
+        logger.info(f"\nCross-cohort results saved to: {results_path}")
+        
+        return c_index_test
+        
     
     def _extract_and_save_importances(self, model):
         """Extract gene importances and save to file."""
