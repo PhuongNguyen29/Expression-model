@@ -134,40 +134,63 @@ def train_model_on_cohort(
     
     logger.info(f"Expression matrix after consensus filtering: {expr_filtered.shape}")
     
-    # Standardize (per-gene z-score)
-    expr_mean = expr_filtered.mean(axis=1).values.reshape(-1, 1)
-    expr_std = expr_filtered.std(axis=1).values.reshape(-1, 1)
-    expr_standardized = pd.DataFrame(
-        (expr_filtered.values - expr_mean) / (expr_std + 1e-8),
-        index=expr_filtered.index,
-        columns=expr_filtered.columns
-)
-    
-    logger.info(f"Standardized: mean={expr_standardized.values.mean():.4f}, std={expr_standardized.values.std():.4f}")
-    
-    # Create dataset
-    # dataset = SurvivalDataset(expr_standardized, surv)
-
     train_samples, val_samples = train_test_split(
-        expr_standardized.columns.tolist(),
+        expr_filtered.columns.tolist(),
         test_size=0.2,
         stratify=surv['event'].values,
         random_state=42
     )
-
+    
     logger.info(f"Split: {len(train_samples)} train, {len(val_samples)} validation")
-
-    # Create separate datasets
-    expr_train = expr_standardized[train_samples]
-    expr_val = expr_standardized[val_samples]
+    
+    # Separate train and validation (BEFORE standardization)
+    expr_train_raw = expr_filtered[train_samples]
+    expr_val_raw = expr_filtered[val_samples]
     surv_train = surv.loc[train_samples]
     surv_val = surv.loc[val_samples]
-
-    train_dataset = SurvivalDataset(expr_train, surv_train)
-    val_dataset = SurvivalDataset(expr_val, surv_val)
+    
+    # ============================================================
+    # Standardize using TRAINING statistics ONLY
+    # ============================================================
+    # Compute mean/std from TRAINING data only
+    train_mean = expr_train_raw.mean(axis=1).values.reshape(-1, 1)
+    train_std = expr_train_raw.std(axis=1).values.reshape(-1, 1)
+    
+    logger.info(f"Computed statistics from TRAINING data only:")
+    logger.info(f"  Mean range: [{train_mean.min():.4f}, {train_mean.max():.4f}]")
+    logger.info(f"  Std range: [{train_std.min():.4f}, {train_std.max():.4f}]")
+    
+    # Standardize training data using its own statistics
+    expr_train_std = pd.DataFrame(
+        (expr_train_raw.values - train_mean) / (train_std + 1e-8),
+        index=expr_train_raw.index,
+        columns=expr_train_raw.columns
+    )
+    
+    # Standardize validation data using TRAINING statistics (NOT its own!)
+    expr_val_std = pd.DataFrame(
+        (expr_val_raw.values - train_mean) / (train_std + 1e-8),
+        index=expr_val_raw.index,
+        columns=expr_val_raw.columns
+    )
+    
+    logger.info(f"After standardization:")
+    logger.info(f"  Train: mean={expr_train_std.values.mean():.4f}, std={expr_train_std.values.std():.4f}")
+    logger.info(f"  Val: mean={expr_val_std.values.mean():.4f}, std={expr_val_std.values.std():.4f}")
+    
+    # Data leakage verification
+    overlap = set(train_samples) & set(val_samples)
+    logger.info(f"  Sample overlap check: {len(overlap)} (MUST be 0)")
+    assert len(overlap) == 0, "CRITICAL ERROR: Train/val samples overlap!"
+    
+    # ============================================================
+    # Create datasets with properly standardized data
+    # ============================================================
+    train_dataset = SurvivalDataset(expr_train_std, surv_train)
+    val_dataset = SurvivalDataset(expr_val_std, surv_val)
     
     batch_size = best_params.get('batch_size', 32)
-
+    
     # Create batch samplers
     train_batch_sampler = StratifiedBatchSampler(
         events=surv_train['event'].values,
@@ -176,20 +199,16 @@ def train_model_on_cohort(
         shuffle=True,
         drop_last=False
     )
-
+    
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
+    
     logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-    
-    
-    # Create data loader
-    # data_loader = DataLoader(dataset, batch_sampler=batch_sampler)
-    # logger.info(f"Batches per epoch: {len(data_loader)}")
+
     
     # Build model
-    n_features = expr_standardized.shape[0]
+    n_features = expr_train_std.shape[0]
     
     # Parse architecture from best_params
     if 'layer1_size' in best_params:
@@ -347,7 +366,7 @@ def train_model_on_cohort(
     # ============================================================
     logger.info("Computing feature importance (L2 norm of first layer weights)...")
     importance_scores = compute_l2_feature_importance(model)
-    gene_names = expr_standardized.index.tolist()
+    gene_names = expr_train_std.index.tolist()
     
     # Log importance statistics
     logger.info(f"Importance statistics:")
