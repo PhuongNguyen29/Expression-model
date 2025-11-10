@@ -98,7 +98,7 @@ def train_model_on_cohort(
     cohort_name: str,
     consensus_genes: List[str],
     n_epochs: int = 150
-) -> Tuple[ElasticDeepSurv, np.ndarray, List[str]]:
+) -> Tuple[ElasticDeepSurv, np.ndarray, List[str], float, float]:
     """
     Train model on 100% of cohort data using consensus genes only.
     
@@ -357,7 +357,7 @@ def train_model_on_cohort(
     logger.info(f"  Median: {np.median(importance_scores):.6f}")
     logger.info(f"  Genes with importance > 0: {(importance_scores > 1e-6).sum()}/{len(importance_scores)}")
     
-    return model, importance_scores, gene_names
+    return model, importance_scores, gene_names, final_train_cindex, final_val_cindex
 
 
 def select_top_genes(
@@ -538,7 +538,7 @@ def main():
     surv_orien = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
     
     # Train TCGA model and extract biomarkers
-    tcga_model, tcga_importance, tcga_genes = train_model_on_cohort(
+    tcga_model, tcga_importance, tcga_genes, tcga_train_cindex, tcga_val_cindex = train_model_on_cohort(
         expr_raw=tcga_expr,
         surv=surv_tcga,
         best_params=tcga_params,
@@ -546,9 +546,10 @@ def main():
         consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
+    logger.info(f"TCGA Training complete - Train C-index: {tcga_train_cindex:.4f}, Val C-index: {tcga_val_cindex:.4f}")
     
     # Train ORIEN model and extract biomarkers
-    orien_model, orien_importance, orien_genes = train_model_on_cohort(
+    orien_model, orien_importance, orien_genes, orien_train_cindex, orien_val_cindex = train_model_on_cohort(
         expr_raw=orien_expr,
         surv=surv_orien,
         best_params=orien_params,
@@ -556,6 +557,7 @@ def main():
         consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
+    logger.info(f"ORIEN Training complete - Train C-index: {orien_train_cindex:.4f}, Val C-index: {orien_val_cindex:.4f}")
     
     # Verify gene lists match
     assert tcga_genes == orien_genes, "Gene lists don't match after preprocessing!"
@@ -645,21 +647,29 @@ def main():
     summary = {
         'timestamp': datetime.now().isoformat(),
         'selection_method': args.selection_method,
-        'selection_params': selection_params,
-        'n_input_genes': len(gene_names),
+        'selection_params': f"top {100-args.percentile:.1f}%" if args.selection_method == 'percentile' else f"top {args.top_n}",
+        'n_input_genes': len(consensus_genes),
         'tcga': {
-            'n_samples': 339,
+            'n_samples': len(surv_tcga),
             'n_selected_genes': len(tcga_selected),
-            'architecture': tcga_params.get('architecture_2layer', 'unknown'),
+            'final_train_cindex': float(tcga_train_cindex),
+            'final_val_cindex': float(tcga_val_cindex),
             'n_params': sum(p.numel() for p in tcga_model.parameters())
         },
         'orien': {
-            'n_samples': 1112,
+            'n_samples': len(surv_orien),
             'n_selected_genes': len(orien_selected),
-            'architecture': orien_params.get('architecture_2layer', 'unknown'),
+            'final_train_cindex': float(orien_train_cindex),
+            'final_val_cindex': float(orien_val_cindex),
             'n_params': sum(p.numel() for p in orien_model.parameters())
         },
-        'consensus': consensus_results
+        'consensus': {
+            'n_consensus': len(consensus_biomarkers),
+            'n_tcga_only': len(tcga_only),
+            'n_orien_only': len(orien_only),
+            'jaccard_index': float(jaccard),
+            'overlap_rate': float(overlap)
+        }
     }
     
     with open(output_dir / 'SUMMARY.json', 'w') as f:
