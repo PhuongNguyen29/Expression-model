@@ -173,16 +173,22 @@ class FinalModelTrainer:
         model = ElasticDeepSurv(**model_config).to(self.device)
         
         # Create optimizer
-        optimizer = create_proximal_optimizer(
-            model.parameters(),
-            optimizer_type='fista',
-            lr=learning_rate,
-            alpha=0.1,  # Dummy
-            l1_ratio=self.l1_ratio,
-            use_group_lasso=True,
-            lambda_scale=self.lambda_val
-        )
+        # optimizer = create_proximal_optimizer(
+        #     model.parameters(),
+        #     optimizer_type='fista',
+        #     lr=learning_rate,
+        #     alpha=0.1,  # Dummy
+        #     l1_ratio=self.l1_ratio,
+        #     use_group_lasso=True,
+        #     lambda_scale=self.lambda_val
+        # )
         
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=params['learning_rate'],
+            weight_decay=0  # No weight decay, we handle regularization explicitly
+        )
+                
         # Create dataloader (no split - use all data)
         dataset = TensorDataset(self.X, self.T, self.E)
         
@@ -258,12 +264,18 @@ class FinalModelTrainer:
                 
                 # Cox loss only (proximal handles regularization)
                 cox_criterion = CoxPHLoss()
-                loss = cox_criterion(risk_scores, T_batch, E_batch)
+                # loss = cox_criterion(risk_scores, T_batch, E_batch)
+                risk_scores = model(X_batch)
+                cox_loss = cox_criterion(risk_scores, T_batch, E_batch)
+                elastic_penalty = model.get_elastic_penalty()  # Get penalty from model
+                total_loss = cox_loss + elastic_penalty
+                loss = total_loss
+
                 
                 # Backward pass
                 optimizer.zero_grad()
-                loss.backward()
-                
+                total_loss.backward()
+
                 # Track gradient norm
                 total_norm = 0
                 for p in model.parameters():

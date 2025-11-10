@@ -215,7 +215,7 @@ class ComprehensiveHyperparameterTuner:
             params['batch_size'] = trial.suggest_categorical('batch_size', [32, 48])
             
             # Lambda range for TCGA
-            params['lambda_val'] = trial.suggest_float('lambda', 0.00005, 0.001, log=True)
+            params['lambda_val'] = trial.suggest_float('lambda', 0.0005, 0.001, log=True)
             
         else:  # ORIEN
             n_layers = trial.suggest_int('n_layers', 2, 3)
@@ -236,10 +236,10 @@ class ComprehensiveHyperparameterTuner:
             params['batch_size'] = trial.suggest_categorical('batch_size', [48, 64])
             
             # Much weaker lambda range for ORIEN (lower event rate + boundary issue)
-            params['lambda_val'] = trial.suggest_float('lambda', 0.000001, 0.00005, log=True)
+            params['lambda_val'] = trial.suggest_float('lambda', 0.00001, 0.0005, log=True)
         
         # Common hyperparameters
-        params['l1_ratio'] = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7])  # More Ridge, less Lasso
+        params['l1_ratio'] = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7, 0.9])  # More Ridge, less Lasso
         params['learning_rate'] = trial.suggest_float('learning_rate', 1e-4, 1e-3, log=True)
         params['activation'] = 'relu'  # Fixed
         params['batch_norm'] = True    # Fixed
@@ -303,14 +303,19 @@ class ComprehensiveHyperparameterTuner:
         ).to(self.device)
         
         # Create optimizer
-        optimizer = create_proximal_optimizer(
+        # optimizer = create_proximal_optimizer(
+        #     model.parameters(),
+        #     optimizer_type='fista',
+        #     lr=params['learning_rate'],
+        #     alpha=0.1,  # Dummy
+        #     l1_ratio=params['l1_ratio'],
+        #     use_group_lasso=True,
+        #     lambda_scale=params['lambda_val']
+        # )
+        optimizer = torch.optim.Adam(
             model.parameters(),
-            optimizer_type='fista',
             lr=params['learning_rate'],
-            alpha=0.1,  # Dummy
-            l1_ratio=params['l1_ratio'],
-            use_group_lasso=True,
-            lambda_scale=params['lambda_val']
+            weight_decay=0  # No weight decay, we handle regularization explicitly
         )
         
         cox_criterion = CoxPHLoss()
@@ -329,8 +334,11 @@ class ComprehensiveHyperparameterTuner:
                 X_batch, T_batch, E_batch = batch_data
                 
                 risk_scores = model(X_batch)
-                loss = cox_criterion(risk_scores, T_batch, E_batch)
-                
+                cox_loss = cox_criterion(risk_scores, T_batch, E_batch)
+                elastic_penalty = model.get_elastic_penalty()  # Get penalty from model
+                total_loss = cox_loss + elastic_penalty
+                loss = total_loss
+                                
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
