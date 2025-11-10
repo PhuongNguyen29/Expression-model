@@ -207,6 +207,7 @@ class LeakageFreeHyperparameterTuner:
             if n_layers == 1:
                 layer1_size = trial.suggest_categorical('layer1_size', [64, 128, 256])
                 hidden_sizes = [layer1_size]
+                alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
             else:  # n_layers == 2
             # Two layers: use predefined patterns to avoid Optuna conflicts
                 architecture = trial.suggest_categorical(
@@ -218,6 +219,7 @@ class LeakageFreeHyperparameterTuner:
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
             batch_size = trial.suggest_categorical('batch_size', [32, 48])
+            alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
         else:  # ORIEN
             n_layers = trial.suggest_int('n_layers', 2, 3)
             if n_layers == 2:
@@ -237,14 +239,15 @@ class LeakageFreeHyperparameterTuner:
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
+            alpha = trial.suggest_float('alpha', 5e-6, 1e-4, log=True)
         
         activation = trial.suggest_categorical('activation', ['relu', 'elu'])
         batch_norm = trial.suggest_categorical('batch_norm', [True, False])
         weight_init = trial.suggest_categorical('weight_init', ['xavier_normal', 'kaiming_uniform'])
         
         # ElasticDeepSurv-specific parameters
-        alpha = trial.suggest_float('alpha', 1e-4, 1e-2, log=True)
-        l1_ratio = trial.suggest_categorical('l1_ratio', [0.5, 0.7, 0.9])
+        # alpha = trial.suggest_float('alpha', 1e-4, 1e-2, log=True)
+        l1_ratio = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7, 0.9])
         learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
         
         skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
@@ -352,6 +355,36 @@ class LeakageFreeHyperparameterTuner:
         mean_cindex = np.mean(cv_scores)
         std_cindex = np.std(cv_scores)
         
+        try:
+            sparsity_info = model.get_sparsity_info()
+            sparsity_ratio = sparsity_info['sparsity_ratio']
+            
+            # Log sparsity for monitoring
+            logger.info(f"  Sparsity: {sparsity_ratio:.1%}")
+            
+            # Penalize if sparsity is too low
+            # We want at least 5% of genes eliminated (sparsity > 0.05)
+            MIN_SPARSITY = 0.05  # 5% threshold
+            
+            if sparsity_ratio < MIN_SPARSITY:
+                # Penalty proportional to how far below threshold
+                sparsity_penalty = 0.1 * (MIN_SPARSITY - sparsity_ratio)
+                logger.info(f"  Sparsity penalty: {sparsity_penalty:.4f} (sparsity below {MIN_SPARSITY:.1%})")
+            else:
+                sparsity_penalty = 0.0
+                logger.info(f"  No sparsity penalty (sparsity above threshold)")
+            
+            # Combined objective: C-index minus penalty
+            objective_value = mean_cindex - sparsity_penalty
+            
+            logger.info(f"\nTrial {trial.number}: C-index={mean_cindex:.4f} ± {std_cindex:.4f}, "
+                        f"Sparsity={sparsity_ratio:.1%}, "
+                        f"Objective={objective_value:.4f}")
+            
+            return objective_value
+            
+        except Exception as e:
+            logger.warning(f"  Could not compute sparsity: {e}")
         logger.info(f"\nTrial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
         
         return mean_cindex

@@ -26,6 +26,8 @@ import yaml
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Set
+import numpy as np
+from sklearn.model_selection import train_test_split
 
 from src.data.preprocessor import GeneExpressionPreprocessor
 from src.data.dataset import SurvivalDataset
@@ -63,11 +65,27 @@ def compute_l2_feature_importance(model: ElasticDeepSurv) -> np.ndarray:
     
     Standard method from Simonyan et al. (2014) "Deep Inside CNNs"
     """
-    first_layer = model.network[0]  # First linear layer
-    weights = first_layer.weight.data.cpu().numpy()  # Shape: (hidden_size, n_genes)
+    try:
+        first_layer = model.network[0]
+        
+        # Verify it's actually a Linear layer
+        if not isinstance(first_layer, nn.Linear):
+            raise TypeError(f"First layer is {type(first_layer)}, not nn.Linear")
+        
+    except (IndexError, AttributeError) as e:
+        raise ValueError(f"Could not access first layer: {e}")
     
-    # L2 norm across output dimension
-    importance = np.linalg.norm(weights, axis=0)  # Shape: (n_genes,)
+    weights = first_layer.weight.data.cpu().numpy()  # [hidden_size, n_genes]
+    
+    # Verify shape
+    logger.info(f"First layer weights shape: {weights.shape}")
+    
+    # L2 norm across output dimension (axis=0)
+    importance = np.linalg.norm(weights, axis=0)  # [n_genes]
+    
+    logger.info(f"Computed importance for {len(importance)} genes")
+    logger.info(f"Importance range: [{importance.min():.6f}, {importance.max():.6f}]")
+    logger.info(f"Mean importance: {importance.mean():.6f}")
     
     return importance
 
@@ -127,50 +145,68 @@ def train_model_on_cohort(
     logger.info(f"Standardized: mean={expr_standardized.values.mean():.4f}, std={expr_standardized.values.std():.4f}")
     
     # Create dataset
-    dataset = SurvivalDataset(expr_standardized, surv)
+    # dataset = SurvivalDataset(expr_standardized, surv)
+
+    train_samples, val_samples = train_test_split(
+        expr_standardized.columns.tolist(),
+        test_size=0.2,
+        stratify=surv['event'].values,
+        random_state=42
+    )
+
+    logger.info(f"Split: {len(train_samples)} train, {len(val_samples)} validation")
+
+    # Create separate datasets
+    expr_train = expr_standardized[train_samples]
+    expr_val = expr_standardized[val_samples]
+    surv_train = surv.loc[train_samples]
+    surv_val = surv.loc[val_samples]
+
+    train_dataset = SurvivalDataset(expr_train, surv_train)
+    val_dataset = SurvivalDataset(expr_val, surv_val)
     
-    # Create batch sampler
-    batch_size = best_params.get('batch_size', 64)
-    batch_sampler = StratifiedBatchSampler(
-        events=surv['event'].values,
+    batch_size = best_params.get('batch_size', 32)
+
+    # Create batch samplers
+    train_batch_sampler = StratifiedBatchSampler(
+        events=surv_train['event'].values,
         batch_size=batch_size,
         min_events_per_batch=1,
         shuffle=True,
         drop_last=False
     )
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    
     
     # Create data loader
-    data_loader = DataLoader(dataset, batch_sampler=batch_sampler)
-    
-    logger.info(f"Batches per epoch: {len(data_loader)}")
+    # data_loader = DataLoader(dataset, batch_sampler=batch_sampler)
+    # logger.info(f"Batches per epoch: {len(data_loader)}")
     
     # Build model
     n_features = expr_standardized.shape[0]
     
     # Parse architecture from best_params
-    if 'architecture_2layer' in best_params:
+    if 'layer1_size' in best_params:
+        hidden_sizes = [best_params['layer1_size']]
+    elif 'architecture_2layer' in best_params:
         hidden_sizes = [int(x) for x in best_params['architecture_2layer'].split('-')]
     elif 'architecture_3layer' in best_params:
         hidden_sizes = [int(x) for x in best_params['architecture_3layer'].split('-')]
-    elif 'architecture_1layer' in best_params:
-        hidden_sizes = [int(best_params['architecture_1layer'])]
     else:
-        # Fallback
-        hidden_sizes = [256, 128]
+        hidden_sizes = [256, 64]
         logger.warning(f"Could not parse architecture, using default: {hidden_sizes}")
     
     logger.info(f"Architecture: {n_features} → {' → '.join(map(str, hidden_sizes))} → 1")
     
-    model = ElasticDeepSurv(
-        n_features=n_features,
-        hidden_sizes=hidden_sizes,
-        dropout=best_params.get('dropout', 0.3),
-        activation=best_params.get('activation', 'relu'),
-        batch_norm=best_params.get('batch_norm', False),
-        weight_init=best_params.get('weight_init', 'kaiming_uniform'),
-        l1_ratio=best_params.get('l1_ratio', 0.7),
-        alpha=best_params.get('alpha', 0.001)
-    )
+    alpha_cv = best_params.get('alpha', 0.001)
+    learning_rate = best_params.get('learning_rate', 1e-4)
+    
+    
     
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -180,37 +216,155 @@ def train_model_on_cohort(
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Training on: {device}")
     
-    adjusted_lr = best_params.get('learning_rate', 1e-4) * 0.5
+    learning_rate = best_params.get('learning_rate', 1e-4)
+    alpha_cv = best_params.get('alpha', 0.001)
 
+    if cohort_name == 'TCGA':
+        n_cv = 271  # Approximate CV fold size (339 * 0.8)
+        n_train = len(train_samples)  # Actual training size (339 * 0.8 = 271)
+    elif cohort_name == 'ORIEN':
+        n_cv = 890  # Approximate CV fold size (1112 * 0.8)
+        n_train = len(train_samples)  # Actual training size
+    else:
+        # Fallback
+        n_cv = int(len(surv) * 0.8)
+        n_train = len(train_samples)
+        
+
+    # CRITICAL: Scale lambda for sample size difference
+    # alpha_scaled = alpha_cv * np.sqrt(n_cv / n_train)
+
+    logger.info(f"\nLambda scaling:")
+    logger.info(f"  CV lambda: {alpha_cv:.6f} (optimized for n_CV={n_cv})")
+    logger.info(f"  Train samples: {n_train}")
+    #logger.info(f"  Scaled lambda: {alpha_scaled:.6f}")
+    logger.info(f"  Scale factor: {np.sqrt(n_cv / n_train):.4f}")
+
+    # Use SCALED lambda, not original
+    model = ElasticDeepSurv(
+        n_features=n_features,
+        hidden_sizes=hidden_sizes,
+        dropout=best_params.get('dropout', 0.3),
+        activation=best_params.get('activation', 'relu'),
+        batch_norm=best_params.get('batch_norm', False),
+        weight_init=best_params.get('weight_init', 'kaiming_uniform'),
+        l1_ratio=best_params.get('l1_ratio', 0.7),
+        alpha=alpha_cv  # ← USE SCALED, not alpha_cv!
+    )
+    
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total trainable parameters: {n_params:,}")
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Training device: {device}")
+
+    # Use exact learning rate from CV (don't adjust)
     trainer = ElasticDeepSurvTrainer(
         model=model,
-        learning_rate=adjusted_lr,
+        learning_rate=learning_rate,  # Don't multiply by 0.5!
         weight_decay=0.0,
         device=device
     )
 
-    logger.info(f"Adjusted learning rate: {adjusted_lr:.6f} (50% of original for 308 genes)")
+    logger.info(f"Using learning rate: {learning_rate:.6f} (from CV)")
         
     logger.info(f"Training for {n_epochs} epochs...")
     
     # FIXED: Pass valid_loader=None explicitly and handle in trainer
+    # history = trainer.fit(
+    #     train_loader=data_loader,
+    #     valid_loader=None,  # No validation, using 100% data
+    #     n_epochs=n_epochs,
+    #     early_stopping_patience=None,  # Disable early stopping
+    #     verbose=True
+    # )
+    
     history = trainer.fit(
-        train_loader=data_loader,
-        valid_loader=None,  # No validation, using 100% data
-        n_epochs=n_epochs,
-        early_stopping_patience=None,  # Disable early stopping
-        verbose=True
-    )
+    train_loader=train_loader,
+    valid_loader=val_loader,  # ← Use validation!
+    n_epochs=100,  # Reduced from 150
+    early_stopping_patience=20,  # ← Enable early stopping!
+    verbose=True
+)
     
-    logger.info(f"Training complete!")
-    logger.info(f"Final Cox loss: {history['cox_loss'][-1]:.4f}")
-    logger.info(f"Final train C-index: {history['train_cindex'][-1]:.4f}")
+    final_train_cindex = history['train_cindex'][-1]
+    final_val_cindex = history['valid_c_index'][-1]
     
-    # Extract feature importance
-    logger.info("Computing feature importance (L2 norm)...")
+    try:
+        sparsity_info = model.get_sparsity_info()
+        final_sparsity = sparsity_info['sparsity_ratio']
+    except:
+        final_sparsity = 0.0
+        logger.warning("Could not compute sparsity")
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TRAINING COMPLETE - QUALITY CHECK")
+    logger.info(f"{'='*60}")
+    logger.info(f"Final train C-index: {final_train_cindex:.4f}")
+    logger.info(f"Final validation C-index: {final_val_cindex:.4f}")
+    logger.info(f"Train/Val gap: {abs(final_train_cindex - final_val_cindex):.4f}")
+    logger.info(f"Final sparsity: {final_sparsity:.1%}")
+    logger.info(f"Best epoch: {history['best_epoch'] if 'best_epoch' in history else 'N/A'}")
+    
+    # Quality thresholds
+    MIN_CINDEX = 0.58
+    MIN_SPARSITY = 0.01
+    
+    quality_issues = []
+    
+    if final_val_cindex < MIN_CINDEX:
+        quality_issues.append(
+            f"Validation C-index too low: {final_val_cindex:.4f} < {MIN_CINDEX}"
+        )
+    
+    if final_sparsity < MIN_SPARSITY:
+        quality_issues.append(
+            f"No sparsity achieved: {final_sparsity:.1%} < {MIN_SPARSITY:.1%}"
+        )
+    
+    if abs(final_train_cindex - final_val_cindex) > 0.15:
+        quality_issues.append(
+            f"Large train/val gap: {abs(final_train_cindex - final_val_cindex):.4f} > 0.15"
+        )
+    
+    if quality_issues:
+        logger.warning(f"\n{'='*60}")
+        logger.warning(f"MODEL QUALITY ISSUES DETECTED:")
+        for issue in quality_issues:
+            logger.warning(f"  {issue}")
+        logger.warning(f"{'='*60}")
+        logger.warning(f"\nBiomarkers may be unreliable. Consider:")
+        logger.warning(f"  1. Re-running hyperparameter search")
+        logger.warning(f"  2. Using weaker lambda")
+        logger.warning(f"  3. Falling back to Cox elastic net")
+        logger.warning(f"{'='*60}\n")
+        
+        # Stop if completely failed
+        if final_val_cindex < 0.52:
+            raise ValueError(
+                f"Model failed completely (C-index={final_val_cindex:.4f}). "
+                f"Cannot extract meaningful biomarkers. "
+                f"Please fix hyperparameters."
+            )
+    else:
+        logger.info(f"All quality checks passed!")
+    
+    logger.info(f"{'='*60}\n")
+    
+    # ============================================================
+    # STEP 8: Extract feature importance
+    # ============================================================
+    logger.info("Computing feature importance (L2 norm of first layer weights)...")
     importance_scores = compute_l2_feature_importance(model)
-    
     gene_names = expr_standardized.index.tolist()
+    
+    # Log importance statistics
+    logger.info(f"Importance statistics:")
+    logger.info(f"  Min: {importance_scores.min():.6f}")
+    logger.info(f"  Max: {importance_scores.max():.6f}")
+    logger.info(f"  Mean: {importance_scores.mean():.6f}")
+    logger.info(f"  Median: {np.median(importance_scores):.6f}")
+    logger.info(f"  Genes with importance > 0: {(importance_scores > 1e-6).sum()}/{len(importance_scores)}")
     
     return model, importance_scores, gene_names
 
@@ -355,7 +509,7 @@ def main():
     parser.add_argument(
         '--n_epochs',
         type=int,
-        default=150,
+        default=100,
         help='Number of training epochs'
     )
     
