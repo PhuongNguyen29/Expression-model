@@ -203,15 +203,6 @@ def train_model_on_cohort(
     
     logger.info(f"Architecture: {n_features} → {' → '.join(map(str, hidden_sizes))} → 1")
     
-    alpha_cv = best_params.get('alpha', 0.001)
-    learning_rate = best_params.get('learning_rate', 1e-4)
-    
-    
-    
-    # Count parameters
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {n_params:,}")
-    
     # Train model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Training on: {device}")
@@ -240,7 +231,6 @@ def train_model_on_cohort(
     #logger.info(f"  Scaled lambda: {alpha_scaled:.6f}")
     logger.info(f"  Scale factor: {np.sqrt(n_cv / n_train):.4f}")
 
-    # Use SCALED lambda, not original
     model = ElasticDeepSurv(
         n_features=n_features,
         hidden_sizes=hidden_sizes,
@@ -249,7 +239,7 @@ def train_model_on_cohort(
         batch_norm=best_params.get('batch_norm', False),
         weight_init=best_params.get('weight_init', 'kaiming_uniform'),
         l1_ratio=best_params.get('l1_ratio', 0.7),
-        alpha=alpha_cv  # ← USE SCALED, not alpha_cv!
+        alpha=alpha_cv 
     )
     
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
