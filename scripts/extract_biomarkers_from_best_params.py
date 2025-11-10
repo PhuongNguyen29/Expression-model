@@ -647,8 +647,8 @@ def main():
     summary = {
         'timestamp': datetime.now().isoformat(),
         'selection_method': args.selection_method,
-        'selection_params': f"top {100-args.percentile:.1f}%" if args.selection_method == 'percentile' else f"top {args.top_n}",
-        'n_input_genes': len(consensus_genes),
+        'selection_params': selection_params,  # Use the variable already defined above
+        'n_input_genes': len(consensus_genes),  # This is correct - the 308 input genes
         'tcga': {
             'n_samples': len(surv_tcga),
             'n_selected_genes': len(tcga_selected),
@@ -664,14 +664,15 @@ def main():
             'n_params': sum(p.numel() for p in orien_model.parameters())
         },
         'consensus': {
-            'n_consensus': len(consensus_biomarkers),
-            'n_tcga_only': len(tcga_only),
-            'n_orien_only': len(orien_only),
-            'jaccard_index': float(jaccard),
-            'overlap_rate': float(overlap)
+            'n_consensus': consensus_results['n_consensus'],
+            'n_tcga_only': consensus_results['n_tcga_only'],
+            'n_orien_only': consensus_results['n_orien_only'],
+            'jaccard_index': float(consensus_results['jaccard_index']),
+            'overlap_rate': float(consensus_results['overlap_rate'])
         }
     }
     
+
     with open(output_dir / 'SUMMARY.json', 'w') as f:
         json.dump(summary, f, indent=2)
     
