@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Set
 import numpy as np
 from sklearn.model_selection import train_test_split
+import torch.nn as nn
 
 from src.data.preprocessor import GeneExpressionPreprocessor
 from src.data.dataset import SurvivalDataset
