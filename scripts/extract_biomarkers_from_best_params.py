@@ -217,19 +217,53 @@ def train_model_on_cohort(
         device=device
     )
     
-    logger.info(f"Training for {n_epochs} epochs (no early stopping)...")
-    
+    logger.info(f"Training for {n_epochs} epochs (no validation split)...")
+
     # Train without validation
     history = trainer.fit(
         train_loader=full_loader,
-        valid_loader=None,  # No validation!
+        valid_loader=None,
         n_epochs=n_epochs,
-        early_stopping_patience=None,  # Disable early stopping
+        early_stopping_patience=None,
         verbose=True
     )
-    
+
+    # ============================================================
+    # SAFE HISTORY ACCESS - Check if history is valid
+    # ============================================================
+    logger.info("\nChecking training history...")
+    logger.info(f"History type: {type(history)}")
+
+    if history is None:
+        raise RuntimeError("trainer.fit() returned None! Check ElasticDeepSurvTrainer implementation.")
+
+    if not isinstance(history, dict):
+        raise RuntimeError(f"trainer.fit() returned {type(history)}, expected dict!")
+
+    logger.info(f"History keys: {list(history.keys())}")
+
+    # Check if required keys exist
+    if 'train_loss' not in history:
+        raise RuntimeError(f"'train_loss' not in history! Available keys: {list(history.keys())}")
+
+    if 'train_cindex' not in history:
+        raise RuntimeError(f"'train_cindex' not in history! Available keys: {list(history.keys())}")
+
+    # Check if lists are non-empty
+    if len(history['train_loss']) == 0:
+        raise RuntimeError("history['train_loss'] is empty! No epochs were recorded.")
+
+    if len(history['train_cindex']) == 0:
+        raise RuntimeError("history['train_cindex'] is empty! No epochs were recorded.")
+
+    logger.info(f"✅ History valid - {len(history['train_loss'])} epochs recorded")
+
+    # Safe access
     final_train_loss = history['train_loss'][-1]
     final_train_cindex = history['train_cindex'][-1]
+
+    logger.info(f"Final training loss: {final_train_loss:.4f}")
+    logger.info(f"Final training C-index: {final_train_cindex:.4f}")
     
     logger.info(f"\n{'='*60}")
     logger.info(f"TRAINING COMPLETE")
