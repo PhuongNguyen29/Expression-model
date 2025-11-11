@@ -370,9 +370,10 @@ class ElasticDeepSurvTrainer:
             
             #early stoping
             if early_stopping_patience is not None and valid_loader is not None:
-                if valid_cindex > best_cindex:
-                    best_cindex = valid_cindex
-                    best_model_state = self.model.state_dict().copy()
+                if valid_cindex > self.best_cindex:
+                    self.best_cindex = valid_cindex
+                    self.best_epoch = epoch
+                    self.best_model_state = self.model.state_dict().copy()
                     patience_counter = 0
                 else:
                     patience_counter += 1
