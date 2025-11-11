@@ -229,47 +229,53 @@ def train_model_on_cohort(
     )
 
     # ============================================================
-    # SAFE HISTORY ACCESS - Check if history is valid
+    # SAFE HISTORY ACCESS - Handle key name variations
     # ============================================================
     logger.info("\nChecking training history...")
     logger.info(f"History type: {type(history)}")
 
     if history is None:
-        raise RuntimeError("trainer.fit() returned None! Check ElasticDeepSurvTrainer implementation.")
+        raise RuntimeError("trainer.fit() returned None!")
 
     if not isinstance(history, dict):
         raise RuntimeError(f"trainer.fit() returned {type(history)}, expected dict!")
 
     logger.info(f"History keys: {list(history.keys())}")
 
-    # Check if required keys exist
-    if 'train_loss' not in history:
-        raise RuntimeError(f"'train_loss' not in history! Available keys: {list(history.keys())}")
+    # Handle key name variations ('train_cindex' vs 'valid_c_index')
+    cindex_key = None
+    possible_keys = ['train_cindex', 'valid_cindex', 'valid_c_index']
+    for key in possible_keys:
+        if key in history and len(history[key]) > 0:
+            cindex_key = key
+            break
 
-    if 'train_cindex' not in history:
-        raise RuntimeError(f"'train_cindex' not in history! Available keys: {list(history.keys())}")
+    if cindex_key is None:
+        raise RuntimeError(f"No C-index key found! Available: {list(history.keys())}")
 
     # Check if lists are non-empty
-    if len(history['train_loss']) == 0:
-        raise RuntimeError("history['train_loss'] is empty! No epochs were recorded.")
-
-    if len(history['train_cindex']) == 0:
-        raise RuntimeError("history['train_cindex'] is empty! No epochs were recorded.")
+    if 'train_loss' not in history or len(history['train_loss']) == 0:
+        raise RuntimeError("history['train_loss'] is empty!")
 
     logger.info(f"✅ History valid - {len(history['train_loss'])} epochs recorded")
+    logger.info(f"✅ Using C-index key: '{cindex_key}'")
 
     # Safe access
     final_train_loss = history['train_loss'][-1]
-    final_train_cindex = history['train_cindex'][-1]
+    final_train_cindex = history[cindex_key][-1]
 
     logger.info(f"Final training loss: {final_train_loss:.4f}")
     logger.info(f"Final training C-index: {final_train_cindex:.4f}")
-    
-    logger.info(f"\n{'='*60}")
-    logger.info(f"TRAINING COMPLETE")
-    logger.info(f"{'='*60}")
-    logger.info(f"Final train loss: {final_train_loss:.4f}")
-    logger.info(f"Final train C-index: {final_train_cindex:.4f}")
+
+    # Quality warning
+    if final_train_cindex < 0.58:
+        logger.warning(f"\n{'='*60}")
+        logger.warning(f"⚠️  LOW C-INDEX WARNING: {final_train_cindex:.4f} < 0.58")
+        logger.warning(f"{'='*60}")
+        logger.warning("Model performance is poor. Biomarkers may be unreliable.")
+        logger.warning("Consider implementing proper validation-based training.")
+        logger.warning(f"{'='*60}\n")
+
     
     # Check sparsity
     try:
