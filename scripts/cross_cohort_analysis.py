@@ -82,7 +82,7 @@ def train_consensus_model(
     surv: pd.DataFrame,
     consensus_genes: List[str],
     best_params: dict,
-    n_epochs: int = 50,
+    n_epochs: int = 30,
     device: str = 'cuda',
     verbose: bool = False
 ) -> ElasticDeepSurv:
@@ -348,7 +348,7 @@ def test_consensus_at_k(
     logger.info("Step 3: Training TCGA model on consensus genes...")
     tcga_model_consensus = train_consensus_model(
         tcga_standardized, tcga_surv, consensus_genes,
-        tcga_params, n_epochs=50, device=device, verbose=False
+        tcga_params, n_epochs=30, device=device, verbose=False
     )
     
     # STEP 4: TEST TCGA → ORIEN
@@ -381,7 +381,7 @@ def test_consensus_at_k(
     logger.info("Step 5: Training ORIEN model on consensus genes...")
     orien_model_consensus = train_consensus_model(
         orien_standardized, orien_surv, consensus_genes,
-        orien_params, n_epochs=50, device=device, verbose=False
+        orien_params, n_epochs=30, device=device, verbose=False
     )
     
     # STEP 6: TEST ORIEN → TCGA
