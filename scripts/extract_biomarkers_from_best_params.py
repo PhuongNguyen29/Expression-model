@@ -301,7 +301,7 @@ def train_model_on_cohort(
     quality_issues = []
     
     
-        # Check C-index
+    # Check C-index
     if final_train_cindex < MIN_CINDEX:
         quality_issues.append(
             f"Low training C-index: {final_train_cindex:.4f} < {MIN_CINDEX:.4f}"
