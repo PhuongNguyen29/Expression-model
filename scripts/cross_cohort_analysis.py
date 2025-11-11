@@ -128,7 +128,7 @@ def evaluate_model_cross_cohort(
     
     with torch.no_grad():
         for batch in loader:
-            expr_batch = batch['feature'].to(device)
+            expr_batch = batch['features'].to(device)
             time_batch = batch['time'].cpu().numpy()
             event_batch = batch['event'].cpu().numpy()
             
