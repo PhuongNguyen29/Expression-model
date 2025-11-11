@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 # Dense sampling in the region where overlap becomes useful
-K_VALUES = [40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 140, 150]
+K_VALUES = [70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 140, 150]
 
 CONSENSUS_GENES_FILE = "data/raw/consensus_genes_308.txt"
 COX_BASELINE_FILE = "data/raw/cox_consensus_genes_20.txt"
@@ -82,7 +82,7 @@ def train_consensus_model(
     surv: pd.DataFrame,
     consensus_genes: List[str],
     best_params: dict,
-    n_epochs: int = 30,
+    n_epochs: int = 50,
     device: str = 'cuda',
     verbose: bool = False
 ) -> ElasticDeepSurv:
@@ -348,7 +348,7 @@ def test_consensus_at_k(
     logger.info("Step 3: Training TCGA model on consensus genes...")
     tcga_model_consensus = train_consensus_model(
         tcga_standardized, tcga_surv, consensus_genes,
-        tcga_params, n_epochs=30, device=device, verbose=False
+        tcga_params, n_epochs=50, device=device, verbose=False
     )
     
     # STEP 4: TEST TCGA → ORIEN
@@ -381,7 +381,7 @@ def test_consensus_at_k(
     logger.info("Step 5: Training ORIEN model on consensus genes...")
     orien_model_consensus = train_consensus_model(
         orien_standardized, orien_surv, consensus_genes,
-        orien_params, n_epochs=30, device=device, verbose=False
+        orien_params, n_epochs=50, device=device, verbose=False
     )
     
     # STEP 6: TEST ORIEN → TCGA
