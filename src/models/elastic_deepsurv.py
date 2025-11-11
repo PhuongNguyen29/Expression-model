@@ -318,10 +318,10 @@ class ElasticDeepSurvTrainer:
         valid_loader,
         n_epochs: int = 100,
         early_stopping_patience: int = 20,
-        verbose:bool = True
+        verbose: bool = True
     ):
         """
-         Train the model with early stopping.
+        Train the model with early stopping.
         
         Args:
             train_loader: Training data loader
@@ -336,14 +336,23 @@ class ElasticDeepSurvTrainer:
         best_cindex = 0.0
         patience_counter = 0
         best_model_state = None
+        best_epoch = 0  # Track best epoch locally
         
         logger.info("Starting training...")
         logger.info(f"Max epochs: {n_epochs}, Early stopping patience: {early_stopping_patience}")
         
-        _, _, _, train_cindex = self.evaluate(train_loader)
-        
         for epoch in range(n_epochs):
+            # Training
             train_total, train_cox, train_penalty = self.train_epoch(train_loader)
+            _, _, _, train_cindex = self.evaluate(train_loader)
+            
+            # Store training metrics
+            self.history['train_loss'].append(train_total)  # ← UNCOMMENTED!
+            self.history['train_cindex'].append(train_cindex)
+            self.history['cox_loss'].append(train_cox)
+            self.history['penalty'].append(train_penalty)
+            
+            # Validation
             if valid_loader is not None:
                 valid_total, valid_cox, valid_penalty, valid_cindex = self.evaluate(valid_loader)
                 self.history['valid_loss'].append(valid_total)
@@ -353,48 +362,42 @@ class ElasticDeepSurvTrainer:
                 valid_cindex = train_cindex
                 self.history['valid_loss'].append(None)
                 self.history['valid_c_index'].append(None)
-                        
+            
+            # Sparsity
             sparsity_info = self.model.get_sparsity_info()
             sparsity_ratio = sparsity_info['sparsity_ratio']
-            
-            #store history
-            # self.history['train_loss'].append(train_total)
-            # self.history['valid_loss'].append(valid_total)
-            self.history['train_cindex'].append(train_cindex)
-            self.history['valid_c_index'].append(valid_cindex)
-            self.history['cox_loss'].append(train_cox)
-            self.history['penalty'].append(train_penalty)
             self.history['sparsity'].append(sparsity_ratio)
             
+            # Learning rate scheduler
             self.scheduler.step(valid_cindex)
             
-            #early stoping
+            # Early stopping
             if early_stopping_patience is not None and valid_loader is not None:
-                if valid_cindex > self.best_cindex:
-                    self.best_cindex = valid_cindex
-                    self.best_epoch = epoch
-                    self.best_model_state = self.model.state_dict().copy()
+                if valid_cindex > best_cindex:
+                    best_cindex = valid_cindex
+                    best_epoch = epoch + 1  # ← SAVE 1-INDEXED EPOCH NUMBER
+                    best_model_state = self.model.state_dict().copy()
                     patience_counter = 0
                 else:
                     patience_counter += 1
         
                 if patience_counter >= early_stopping_patience:
-                    logger.info(f"Early stopping at epoch {epoch+1}.")
+                    logger.info(f"Early stopping at epoch {epoch + 1}.")
                     if verbose:
                         logger.info(f"Best C-index: {best_cindex:.4f}")
                     break
-                
-            #Print progress
+            
+            # Print progress
             if verbose:
                 logger.info(
-                    f"Epoch {epoch+1}/{n_epochs} | "
+                    f"Epoch {epoch + 1}/{n_epochs} | "
                     f"Train Loss: {train_total:.4f} (Cox: {train_cox:.4f}, Penalty: {train_penalty:.4f}) | "
                     f"C-index: {train_cindex:.4f} | "
                     f"Valid C-index: {valid_cindex:.4f} | "
                     f"Sparsity: {sparsity_ratio:.1%}"
                 )
-            
-        #Restore best model
+        
+        # Restore best model
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
             logger.info(f"Best model with C-index: {best_cindex:.4f} restored.")
@@ -402,6 +405,10 @@ class ElasticDeepSurvTrainer:
             final_sparsity = self.model.get_sparsity_info()
             logger.info(f"Final model sparsity: {final_sparsity['sparsity_ratio']:.1%} "
                         f"({final_sparsity['n_zeros']} / {final_sparsity['n_total']} weights zeroed).")
+        
+        # Add best_epoch to history
+        self.history['best_epoch'] = best_epoch  # ← ADD THIS!
+        
         return self.history
     
     
