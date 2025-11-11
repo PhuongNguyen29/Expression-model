@@ -98,7 +98,7 @@ def train_model_on_cohort(
     cohort_name: str,
     consensus_genes: List[str],
     n_epochs: int = 150
-) -> Tuple[ElasticDeepSurv, np.ndarray, List[str], float, float]:
+) -> Tuple[ElasticDeepSurv, np.ndarray, List[str], float]:
     """
     Train model on 100% of cohort data using consensus genes only.
     
@@ -134,81 +134,39 @@ def train_model_on_cohort(
     
     logger.info(f"Expression matrix after consensus filtering: {expr_filtered.shape}")
     
-    train_samples, val_samples = train_test_split(
-        expr_filtered.columns.tolist(),
-        test_size=0.2,
-        stratify=surv['event'].values,
-        random_state=42
+    # ============================================================
+    # Use ALL data for biomarker extraction (no train/val split)
+    # ============================================================
+    # Standardize all data (per-gene z-score)
+    expr_mean = expr_filtered.mean(axis=1).values.reshape(-1, 1)
+    expr_std = expr_filtered.std(axis=1).values.reshape(-1, 1)
+    expr_standardized = pd.DataFrame(
+        (expr_filtered.values - expr_mean) / (expr_std + 1e-8),
+        index=expr_filtered.index,
+        columns=expr_filtered.columns
     )
     
-    logger.info(f"Split: {len(train_samples)} train, {len(val_samples)} validation")
+    logger.info(f"Standardized: mean={expr_standardized.values.mean():.4f}, std={expr_standardized.values.std():.4f}")
     
-    # Separate train and validation (BEFORE standardization)
-    expr_train_raw = expr_filtered[train_samples]
-    expr_val_raw = expr_filtered[val_samples]
-    surv_train = surv.loc[train_samples]
-    surv_val = surv.loc[val_samples]
+    # Create full dataset (all samples)
+    full_dataset = SurvivalDataset(expr_standardized, surv)
     
-    # ============================================================
-    # Standardize using TRAINING statistics ONLY
-    # ============================================================
-    # Compute mean/std from TRAINING data only
-    train_mean = expr_train_raw.mean(axis=1).values.reshape(-1, 1)
-    train_std = expr_train_raw.std(axis=1).values.reshape(-1, 1)
-    
-    logger.info(f"Computed statistics from TRAINING data only:")
-    logger.info(f"  Mean range: [{train_mean.min():.4f}, {train_mean.max():.4f}]")
-    logger.info(f"  Std range: [{train_std.min():.4f}, {train_std.max():.4f}]")
-    
-    # Standardize training data using its own statistics
-    expr_train_std = pd.DataFrame(
-        (expr_train_raw.values - train_mean) / (train_std + 1e-8),
-        index=expr_train_raw.index,
-        columns=expr_train_raw.columns
-    )
-    
-    # Standardize validation data using TRAINING statistics (NOT its own!)
-    expr_val_std = pd.DataFrame(
-        (expr_val_raw.values - train_mean) / (train_std + 1e-8),
-        index=expr_val_raw.index,
-        columns=expr_val_raw.columns
-    )
-    
-    logger.info(f"After standardization:")
-    logger.info(f"  Train: mean={expr_train_std.values.mean():.4f}, std={expr_train_std.values.std():.4f}")
-    logger.info(f"  Val: mean={expr_val_std.values.mean():.4f}, std={expr_val_std.values.std():.4f}")
-    
-    # Data leakage verification
-    overlap = set(train_samples) & set(val_samples)
-    logger.info(f"  Sample overlap check: {len(overlap)} (MUST be 0)")
-    assert len(overlap) == 0, "CRITICAL ERROR: Train/val samples overlap!"
-    
-    # ============================================================
-    # Create datasets with properly standardized data
-    # ============================================================
-    train_dataset = SurvivalDataset(expr_train_std, surv_train)
-    val_dataset = SurvivalDataset(expr_val_std, surv_val)
-    
+    # Get batch size
     batch_size = best_params.get('batch_size', 32)
     
-    # Create batch samplers
-    train_batch_sampler = StratifiedBatchSampler(
-        events=surv_train['event'].values,
-        batch_size=batch_size,
-        min_events_per_batch=1,
+    # Create data loader (no stratified sampling needed for full data)
+    full_loader = DataLoader(
+        full_dataset, 
+        batch_size=batch_size, 
         shuffle=True,
         drop_last=False
     )
     
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    
-    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-
+    logger.info(f"Using all {len(full_dataset)} samples")
+    logger.info(f"Batches per epoch: {len(full_loader)}")
     
     # Build model
-    n_features = expr_train_std.shape[0]
+    n_features = expr_standardized.shape[0]
     
     # Parse architecture from best_params
     if 'layer1_size' in best_params:
@@ -223,34 +181,16 @@ def train_model_on_cohort(
     
     logger.info(f"Architecture: {n_features} → {' → '.join(map(str, hidden_sizes))} → 1")
     
-    # Train model
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logger.info(f"Training on: {device}")
-    
-    learning_rate = best_params.get('learning_rate', 1e-4)
+    # Get hyperparameters from CV (use directly - no validation split)
     alpha_cv = best_params.get('alpha', 0.001)
-
-    if cohort_name == 'TCGA':
-        n_cv = 271  # Approximate CV fold size (339 * 0.8)
-        n_train = len(train_samples)  # Actual training size (339 * 0.8 = 271)
-    elif cohort_name == 'ORIEN':
-        n_cv = 890  # Approximate CV fold size (1112 * 0.8)
-        n_train = len(train_samples)  # Actual training size
-    else:
-        # Fallback
-        n_cv = int(len(surv) * 0.8)
-        n_train = len(train_samples)
-        
-
-    # CRITICAL: Scale lambda for sample size difference
-    # alpha_scaled = alpha_cv * np.sqrt(n_cv / n_train)
-
-    logger.info(f"\nLambda scaling:")
-    logger.info(f"  CV lambda: {alpha_cv:.6f} (optimized for n_CV={n_cv})")
-    logger.info(f"  Train samples: {n_train}")
-    #logger.info(f"  Scaled lambda: {alpha_scaled:.6f}")
-    logger.info(f"  Scale factor: {np.sqrt(n_cv / n_train):.4f}")
-
+    learning_rate = best_params.get('learning_rate', 1e-4)
+    
+    logger.info(f"\nUsing hyperparameters from CV:")
+    logger.info(f"  Lambda (alpha): {alpha_cv:.6f}")
+    logger.info(f"  Learning rate: {learning_rate:.6f}")
+    logger.info(f"  (Training on 100% data for maximum biomarker stability)")
+    
+    # Create model
     model = ElasticDeepSurv(
         n_features=n_features,
         hidden_sizes=hidden_sizes,
@@ -259,60 +199,58 @@ def train_model_on_cohort(
         batch_norm=best_params.get('batch_norm', False),
         weight_init=best_params.get('weight_init', 'kaiming_uniform'),
         l1_ratio=best_params.get('l1_ratio', 0.7),
-        alpha=alpha_cv 
+        alpha=alpha_cv
     )
     
+    # Count parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {n_params:,}")
     
+    # Setup training
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"Training device: {device}")
-
-    # Use exact learning rate from CV (don't adjust)
+    
     trainer = ElasticDeepSurvTrainer(
         model=model,
-        learning_rate=learning_rate,  # Don't multiply by 0.5!
+        learning_rate=learning_rate,
         weight_decay=0.0,
         device=device
     )
-
-    logger.info(f"Using learning rate: {learning_rate:.6f} (from CV)")
-        
-    logger.info(f"Training for {n_epochs} epochs...")
     
-    # FIXED: Pass valid_loader=None explicitly and handle in trainer
-    # history = trainer.fit(
-    #     train_loader=data_loader,
-    #     valid_loader=None,  # No validation, using 100% data
-    #     n_epochs=n_epochs,
-    #     early_stopping_patience=None,  # Disable early stopping
-    #     verbose=True
-    # )
+    logger.info(f"Training for {n_epochs} epochs (no early stopping)...")
     
+    # Train without validation
     history = trainer.fit(
-    train_loader=train_loader,
-    valid_loader=val_loader,  # ← Use validation!
-    n_epochs=100,  # Reduced from 150
-    early_stopping_patience=20,  # ← Enable early stopping!
-    verbose=True
-)
+        train_loader=full_loader,
+        valid_loader=None,  # No validation!
+        n_epochs=n_epochs,
+        early_stopping_patience=None,  # Disable early stopping
+        verbose=True
+    )
     
+    final_train_loss = history['train_loss'][-1]
     final_train_cindex = history['train_cindex'][-1]
-    final_val_cindex = history['valid_c_index'][-1]
     
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TRAINING COMPLETE")
+    logger.info(f"{'='*60}")
+    logger.info(f"Final train loss: {final_train_loss:.4f}")
+    logger.info(f"Final train C-index: {final_train_cindex:.4f}")
+    
+    # Check sparsity
     try:
         sparsity_info = model.get_sparsity_info()
         final_sparsity = sparsity_info['sparsity_ratio']
+        logger.info(f"Final sparsity: {final_sparsity:.1%}")
     except:
         final_sparsity = 0.0
         logger.warning("Could not compute sparsity")
+
     
     logger.info(f"\n{'='*60}")
     logger.info(f"TRAINING COMPLETE - QUALITY CHECK")
     logger.info(f"{'='*60}")
     logger.info(f"Final train C-index: {final_train_cindex:.4f}")
-    logger.info(f"Final validation C-index: {final_val_cindex:.4f}")
-    logger.info(f"Train/Val gap: {abs(final_train_cindex - final_val_cindex):.4f}")
     logger.info(f"Final sparsity: {final_sparsity:.1%}")
     logger.info(f"Best epoch: {history['best_epoch'] if 'best_epoch' in history else 'N/A'}")
     
@@ -322,20 +260,19 @@ def train_model_on_cohort(
     
     quality_issues = []
     
-    if final_val_cindex < MIN_CINDEX:
-        quality_issues.append(
-            f"Validation C-index too low: {final_val_cindex:.4f} < {MIN_CINDEX}"
-        )
     
+        # Check C-index
+    if final_train_cindex < MIN_CINDEX:
+        quality_issues.append(
+            f"Low training C-index: {final_train_cindex:.4f} < {MIN_CINDEX:.4f}"
+        )
+
+    # Check sparsity
     if final_sparsity < MIN_SPARSITY:
         quality_issues.append(
             f"No sparsity achieved: {final_sparsity:.1%} < {MIN_SPARSITY:.1%}"
         )
-    
-    if abs(final_train_cindex - final_val_cindex) > 0.15:
-        quality_issues.append(
-            f"Large train/val gap: {abs(final_train_cindex - final_val_cindex):.4f} > 0.15"
-        )
+        
     
     if quality_issues:
         logger.warning(f"\n{'='*60}")
@@ -350,12 +287,7 @@ def train_model_on_cohort(
         logger.warning(f"{'='*60}\n")
         
         # Stop if completely failed
-        if final_val_cindex < 0.52:
-            raise ValueError(
-                f"Model failed completely (C-index={final_val_cindex:.4f}). "
-                f"Cannot extract meaningful biomarkers. "
-                f"Please fix hyperparameters."
-            )
+       
     else:
         logger.info(f"All quality checks passed!")
     
@@ -366,7 +298,7 @@ def train_model_on_cohort(
     # ============================================================
     logger.info("Computing feature importance (L2 norm of first layer weights)...")
     importance_scores = compute_l2_feature_importance(model)
-    gene_names = expr_train_std.index.tolist()
+    gene_names = expr_standardized.index.tolist()
     
     # Log importance statistics
     logger.info(f"Importance statistics:")
@@ -376,70 +308,7 @@ def train_model_on_cohort(
     logger.info(f"  Median: {np.median(importance_scores):.6f}")
     logger.info(f"  Genes with importance > 0: {(importance_scores > 1e-6).sum()}/{len(importance_scores)}")
     
-    return model, importance_scores, gene_names, final_train_cindex, final_val_cindex
-
-
-def select_top_genes(
-    importance_scores: np.ndarray,
-    gene_names: List[str],
-    method: str = 'percentile',
-    percentile: float = 95.0,
-    top_n: int = None
-) -> Tuple[List[str], np.ndarray]:
-    """
-    Select top genes based on importance scores.
-    """
-    if method == 'percentile':
-        threshold = np.percentile(importance_scores, percentile)
-        selected_indices = np.where(importance_scores >= threshold)[0]
-    elif method == 'top_n':
-        selected_indices = np.argsort(importance_scores)[-top_n:]
-    else:
-        raise ValueError(f"Unknown method: {method}")
-    
-    selected_genes = [gene_names[i] for i in selected_indices]
-    selected_scores = importance_scores[selected_indices]
-    
-    # Sort by importance descending
-    sort_idx = np.argsort(selected_scores)[::-1]
-    selected_genes = [selected_genes[i] for i in sort_idx]
-    selected_scores = selected_scores[sort_idx]
-    
-    return selected_genes, selected_scores
-
-
-def compute_consensus_genes(
-    tcga_genes: List[str],
-    orien_genes: List[str]
-) -> Dict:
-    """
-    Compute consensus genes (intersection) between two cohorts.
-    """
-    tcga_set = set(tcga_genes)
-    orien_set = set(orien_genes)
-    
-    consensus = tcga_set & orien_set  # Intersection
-    tcga_only = tcga_set - orien_set
-    orien_only = orien_set - tcga_set
-    
-    # Jaccard index
-    union = tcga_set | orien_set
-    jaccard = len(consensus) / len(union) if len(union) > 0 else 0.0
-    
-    # Overlap rate
-    overlap_rate = len(consensus) / min(len(tcga_set), len(orien_set)) if min(len(tcga_set), len(orien_set)) > 0 else 0.0
-    
-    return {
-        'consensus_genes': sorted(list(consensus)),
-        'n_consensus': len(consensus),
-        'n_tcga_only': len(tcga_only),
-        'n_orien_only': len(orien_only),
-        'jaccard_index': jaccard,
-        'overlap_rate': overlap_rate,
-        'tcga_only_genes': sorted(list(tcga_only)),
-        'orien_only_genes': sorted(list(orien_only))
-    }
-
+    return model, importance_scores, gene_names, final_train_cindex
 
 def compare_with_chapter2(
     neural_consensus: List[str],
@@ -471,64 +340,20 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Extract biomarkers from ElasticDeepSurv models using 308 consensus genes'
+        description='Extract biomarker importance from ElasticDeepSurv models using 308 consensus genes'
     )
-    parser.add_argument(
-        '--tcga_params',
-        type=str,
-        required=True,
-        help='Path to TCGA best_params.json'
-    )
-    parser.add_argument(
-        '--orien_params',
-        type=str,
-        required=True,
-        help='Path to ORIEN best_params.json'
-    )
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default=None,
-        help='Output directory'
-    )
-    parser.add_argument(
-        '--consensus_genes',
-        type=str,
-        default='data/raw/consensus_genes_308.txt',
-        help='Path to consensus genes file (308 genes from Chapter 2)'
-    )
-    parser.add_argument(
-        '--selection_method',
-        type=str,
-        default='percentile',
-        choices=['percentile', 'top_n'],
-        help='Method for selecting top genes'
-    )
-    parser.add_argument(
-        '--percentile',
-        type=float,
-        default=95.0,
-        help='Percentile threshold (e.g., 95.0 for top 5%)'
-    )
-    parser.add_argument(
-        '--top_n',
-        type=int,
-        default=20,
-        help='Number of top genes (if method=top_n)'
-    )
-    parser.add_argument(
-        '--n_epochs',
-        type=int,
-        default=100,
-        help='Number of training epochs'
-    )
+    parser.add_argument('--tcga_params', type=str, required=True)
+    parser.add_argument('--orien_params', type=str, required=True)
+    parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--consensus_genes', type=str, default='data/raw/consensus_genes_308.txt')
+    parser.add_argument('--n_epochs', type=int, default=150)
     
     args = parser.parse_args()
     
     # Create output directory
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"results/biomarker_extraction_{timestamp}"
+        args.output_dir = f"results/biomarker_importance_{timestamp}"
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -540,12 +365,8 @@ def main():
     logger.info("Loading best hyperparameters...")
     with open(args.tcga_params, 'r') as f:
         tcga_params = json.load(f)
-    
     with open(args.orien_params, 'r') as f:
         orien_params = json.load(f)
-    
-    logger.info(f"TCGA best params: {tcga_params}")
-    logger.info(f"ORIEN best params: {orien_params}")
     
     # Load raw data
     logger.info("\nLoading raw expression data...")
@@ -556,8 +377,11 @@ def main():
     surv_tcga = pd.read_csv("data/processed/surv_tcga_harmonized.csv", index_col=0)
     surv_orien = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
     
-    # Train TCGA model and extract biomarkers
-    tcga_model, tcga_importance, tcga_genes, tcga_train_cindex, tcga_val_cindex = train_model_on_cohort(
+    # Train TCGA model
+    logger.info("\n" + "="*60)
+    logger.info("TRAINING TCGA MODEL")
+    logger.info("="*60)
+    tcga_model, tcga_importance, tcga_genes, tcga_train_cindex = train_model_on_cohort(
         expr_raw=tcga_expr,
         surv=surv_tcga,
         best_params=tcga_params,
@@ -565,10 +389,12 @@ def main():
         consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
-    logger.info(f"TCGA Training complete - Train C-index: {tcga_train_cindex:.4f}, Val C-index: {tcga_val_cindex:.4f}")
     
-    # Train ORIEN model and extract biomarkers
-    orien_model, orien_importance, orien_genes, orien_train_cindex, orien_val_cindex = train_model_on_cohort(
+    # Train ORIEN model
+    logger.info("\n" + "="*60)
+    logger.info("TRAINING ORIEN MODEL")
+    logger.info("="*60)
+    orien_model, orien_importance, orien_genes, orien_train_cindex = train_model_on_cohort(
         expr_raw=orien_expr,
         surv=surv_orien,
         best_params=orien_params,
@@ -576,14 +402,13 @@ def main():
         consensus_genes=consensus_genes,
         n_epochs=args.n_epochs
     )
-    logger.info(f"ORIEN Training complete - Train C-index: {orien_train_cindex:.4f}, Val C-index: {orien_val_cindex:.4f}")
     
     # Verify gene lists match
-    assert tcga_genes == orien_genes, "Gene lists don't match after preprocessing!"
+    assert tcga_genes == orien_genes, "Gene lists don't match!"
     gene_names = tcga_genes
     
-    # Save all importance scores
-    logger.info("\nSaving importance scores...")
+    # Save ALL importance scores
+    logger.info("\nSaving importance scores for ALL genes...")
     importance_df = pd.DataFrame({
         'gene_name': gene_names,
         'tcga_importance': tcga_importance,
@@ -594,69 +419,6 @@ def main():
     importance_df.to_csv(output_dir / 'all_gene_importances.csv', index=False)
     logger.info(f"Saved: {output_dir / 'all_gene_importances.csv'}")
     
-    # Select top genes from each cohort
-    logger.info("\nSelecting top genes...")
-    
-    if args.selection_method == 'percentile':
-        tcga_selected, tcga_scores = select_top_genes(
-            tcga_importance, gene_names, 
-            method='percentile', percentile=args.percentile
-        )
-        orien_selected, orien_scores = select_top_genes(
-            orien_importance, gene_names,
-            method='percentile', percentile=args.percentile
-        )
-        selection_params = f"top {100-args.percentile:.1f}%"
-    else:
-        tcga_selected, tcga_scores = select_top_genes(
-            tcga_importance, gene_names,
-            method='top_n', top_n=args.top_n
-        )
-        orien_selected, orien_scores = select_top_genes(
-            orien_importance, gene_names,
-            method='top_n', top_n=args.top_n
-        )
-        selection_params = f"top {args.top_n}"
-    
-    logger.info(f"TCGA selected genes: {len(tcga_selected)}")
-    logger.info(f"ORIEN selected genes: {len(orien_selected)}")
-    
-    # Save cohort-specific genes
-    pd.DataFrame({
-        'gene_name': tcga_selected,
-        'importance': tcga_scores
-    }).to_csv(output_dir / 'tcga_selected_genes.csv', index=False)
-    
-    pd.DataFrame({
-        'gene_name': orien_selected,
-        'importance': orien_scores
-    }).to_csv(output_dir / 'orien_selected_genes.csv', index=False)
-    
-    # Compute consensus genes
-    logger.info("\nComputing consensus genes (TCGA ∩ ORIEN)...")
-    consensus_results = compute_consensus_genes(tcga_selected, orien_selected)
-    
-    logger.info(f"Consensus genes: {consensus_results['n_consensus']}")
-    logger.info(f"TCGA-only genes: {consensus_results['n_tcga_only']}")
-    logger.info(f"ORIEN-only genes: {consensus_results['n_orien_only']}")
-    logger.info(f"Jaccard index: {consensus_results['jaccard_index']:.3f}")
-    logger.info(f"Overlap rate: {consensus_results['overlap_rate']:.1%}")
-    
-    # Save consensus genes
-    if consensus_results['n_consensus'] > 0:
-        consensus_df = pd.DataFrame({
-            'gene_name': consensus_results['consensus_genes']
-        })
-        consensus_df.to_csv(output_dir / 'consensus_genes.csv', index=False)
-        logger.info(f"Saved: {output_dir / 'consensus_genes.csv'}")
-        logger.info(f"Consensus genes: {', '.join(consensus_results['consensus_genes'])}")
-    else:
-        logger.warning("WARNING: No consensus genes found!")
-    
-    # Compare with Chapter 2 (which is the input consensus genes)
-    logger.info("\nNote: Chapter 2 used these same 308 genes, so we're comparing")
-    logger.info("which subset the neural network selected vs Cox regression.")
-    
     # Save models
     logger.info("\nSaving trained models...")
     torch.save(tcga_model.state_dict(), output_dir / 'tcga_model.pth')
@@ -665,55 +427,52 @@ def main():
     # Create summary
     summary = {
         'timestamp': datetime.now().isoformat(),
-        'selection_method': args.selection_method,
-        'selection_params': selection_params,  # Use the variable already defined above
-        'n_input_genes': len(consensus_genes),  # This is correct - the 308 input genes
+        'n_input_genes': len(consensus_genes),
         'tcga': {
             'n_samples': len(surv_tcga),
-            'n_selected_genes': len(tcga_selected),
+            'n_genes': len(tcga_genes),
             'final_train_cindex': float(tcga_train_cindex),
-            'final_val_cindex': float(tcga_val_cindex),
-            'n_params': sum(p.numel() for p in tcga_model.parameters())
+            'n_params': sum(p.numel() for p in tcga_model.parameters()),
+            'importance_stats': {
+                'min': float(tcga_importance.min()),
+                'max': float(tcga_importance.max()),
+                'mean': float(tcga_importance.mean()),
+                'median': float(np.median(tcga_importance)),
+                'std': float(tcga_importance.std())
+            }
         },
         'orien': {
             'n_samples': len(surv_orien),
-            'n_selected_genes': len(orien_selected),
+            'n_genes': len(orien_genes),
             'final_train_cindex': float(orien_train_cindex),
-            'final_val_cindex': float(orien_val_cindex),
-            'n_params': sum(p.numel() for p in orien_model.parameters())
-        },
-        'consensus': {
-            'n_consensus': consensus_results['n_consensus'],
-            'n_tcga_only': consensus_results['n_tcga_only'],
-            'n_orien_only': consensus_results['n_orien_only'],
-            'jaccard_index': float(consensus_results['jaccard_index']),
-            'overlap_rate': float(consensus_results['overlap_rate'])
+            'n_params': sum(p.numel() for p in orien_model.parameters()),
+            'importance_stats': {
+                'min': float(orien_importance.min()),
+                'max': float(orien_importance.max()),
+                'mean': float(orien_importance.mean()),
+                'median': float(np.median(orien_importance)),
+                'std': float(orien_importance.std())
+            }
         }
     }
     
-
+    # Save summary
     with open(output_dir / 'SUMMARY.json', 'w') as f:
         json.dump(summary, f, indent=2)
     
-    # Print final summary
-    logger.info("\n" + "="*60)
+    logger.info(f"\n{'='*60}")
     logger.info("BIOMARKER EXTRACTION COMPLETE")
-    logger.info("="*60)
-    logger.info(f"Output directory: {output_dir}")
-    logger.info(f"Input genes (Chapter 2 consensus): {len(gene_names)}")
-    logger.info(f"TCGA selected: {len(tcga_selected)} genes")
-    logger.info(f"ORIEN selected: {len(orien_selected)} genes")
-    logger.info(f"Neural network consensus: {consensus_results['n_consensus']} genes")
-    logger.info("="*60 + "\n")
-    
-    logger.info("\n📋 NEXT STEPS:")
-    if consensus_results['n_consensus'] > 0:
-        logger.info("1. ✅ Good consensus! Proceed to bidirectional validation")
-        logger.info(f"2. Use: {output_dir}/consensus_genes.csv")
-    else:
-        logger.info("1. ⚠️ No consensus genes - this is a valid finding!")
-        logger.info("2. Consider: Use all 308 genes for bidirectional validation")
-        logger.info("3. Or: Adjust selection threshold and re-run")
+    logger.info(f"{'='*60}")
+    logger.info(f"Results saved to: {output_dir}")
+    logger.info(f"\nOutputs:")
+    logger.info(f"  - all_gene_importances.csv ({len(gene_names)} genes)")
+    logger.info(f"  - tcga_model.pth")
+    logger.info(f"  - orien_model.pth")
+    logger.info(f"  - SUMMARY.json")
+    logger.info(f"\nNext step:")
+    logger.info(f"  Use these importance scores to test different k values")
+    logger.info(f"  and perform bidirectional cross-cohort validation")
+    logger.info(f"{'='*60}")
     
     return summary
 
