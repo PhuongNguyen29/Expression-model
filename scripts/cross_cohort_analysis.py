@@ -52,6 +52,26 @@ COX_BASELINE_FILE = "data/raw/cox_consensus_genes_20.txt"
 # HELPER FUNCTIONS
 # ============================================================
 
+def set_all_seeds(seed: int):
+    """
+    Set all random seeds for reproducibility.
+    
+    Reference: Bouthillier et al. (2021) "Accounting for Variance in 
+    Machine Learning Benchmarks" - MLSys
+    """
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    # For deterministic behavior (may reduce performance)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    logger.info(f"Set all random seeds to: {seed}")
+
 def load_consensus_genes(filepath: str) -> List[str]:
     """Load gene list from file."""
     with open(filepath, 'r') as f:
@@ -538,6 +558,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Consensus-based biomarker validation'
     )
+    parser.add_argument('--seed', type=int, default=42,
+                    help='Random seed for reproducibility')
     parser.add_argument('--tcga_model', type=str, required=True)
     parser.add_argument('--orien_model', type=str, required=True)
     parser.add_argument('--tcga_params', type=str, required=True)
@@ -548,13 +570,17 @@ def main():
     
     args = parser.parse_args()
     
+        # Set random seeds BEFORE any other operations
+    set_all_seeds(args.seed)  # ← ADD THIS
+    
     # Create output directory
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"results/consensus_validation_{timestamp}"
+        args.output_dir = f"results/consensus_validation_{timestamp}_seed{args.seed}"  # ← MODIFY
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
     
     logger.info(f"\n{'='*70}")
     logger.info("CONSENSUS-BASED BIOMARKER VALIDATION")
@@ -733,6 +759,16 @@ def main():
     # Full results JSON
     with open(output_dir / 'full_results.json', 'w') as f:
         json.dump(all_results, f, indent=2)
+    
+    config = {
+    'seed': args.seed,
+    'k_values': args.k_values,
+    'n_epochs': 50,
+    'timestamp': timestamp
+    }
+    with open(output_dir / 'config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    
     
     # Plots
     plot_results(results_df, output_dir)
