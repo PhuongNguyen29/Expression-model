@@ -614,60 +614,90 @@ def parse_optuna_params(optuna_params: Dict) -> Dict:
     return params
 
 
-def load_cohort_data(cohort_name: str, data_dir: str = 'data/raw') -> Dict:
+def load_cohort_data(cohort_name: str, consensus_gene_file: str = 'data/raw/consensus_genes_308.txt') -> Dict:
     """
     Load expression and survival data for a cohort.
     
-    CRITICAL: This loads the SAME 308 consensus genes used in Chapter 3
-    for fair comparison with baseline results.
+    Follows the SAME data loading procedure as Chapter 3 (hyperparam_tuning_elastic_FIXED.py):
+    1. Load batch-corrected raw data (14,778 genes)
+    2. Filter to 308 consensus genes
+    3. Load harmonized survival data
     
     Args:
         cohort_name: 'tcga' or 'orien'
-        data_dir: Directory containing data files (default: 'data/raw')
+        consensus_gene_file: Path to consensus gene list (default: 308 genes)
         
     Returns:
-        Dict with 'expression' and 'survival' DataFrames
+        Dict with 'expression' (308 genes × samples) and 'survival' DataFrames
     """
-    data_path = Path(data_dir)
+    # Load batch-corrected expression data (SAME as Chapter 3)
+    if cohort_name.lower() == 'tcga':
+        expr_file = "data/raw/tcga_batch_corrected_2sv.csv"
+        surv_file = "data/processed/surv_tcga_harmonized.csv"
+    else:  # orien
+        expr_file = "data/raw/orien_batch_corrected.csv"
+        surv_file = "data/processed/surv_orien_harmonized.csv"
     
-    # Load 308 consensus gene expression data (SAME as Chapter 3)
-    # These files should contain only the 308 genes used in your experiments
-    expr_file = data_path / f"{cohort_name}_consensus_308.csv"
-    
-    if not expr_file.exists():
+    # Load expression data
+    if not Path(expr_file).exists():
         raise FileNotFoundError(
-            f"Could not find consensus gene file: {expr_file}\n"
-            f"Expected file with 308 genes used in Chapter 3.\n"
-            f"Available files in {data_path}:\n" + 
-            "\n".join([f"  - {f.name}" for f in data_path.glob(f"{cohort_name}*.csv")])
+            f"Could not find batch-corrected expression data: {expr_file}\n"
+            f"Expected the same files used in Chapter 3 hyperparameter tuning."
         )
     
     expression = pd.read_csv(expr_file, index_col=0)
+    print(f"Loaded {cohort_name.upper()} batch-corrected data: {expression.shape[0]} genes × {expression.shape[1]} samples")
     
-    # Verify we have 308 genes
-    if expression.shape[0] != 308:
-        raise ValueError(
-            f"Expected 308 consensus genes, but found {expression.shape[0]} genes in {expr_file}\n"
-            f"Transfer learning requires the SAME gene set as Chapter 3 for fair comparison."
+    # Filter to 308 consensus genes (SAME as Chapter 3)
+    if not Path(consensus_gene_file).exists():
+        raise FileNotFoundError(
+            f"Could not find consensus gene file: {consensus_gene_file}\n"
+            f"This file should contain the 308 genes used in Chapter 3."
         )
     
-    # Load survival data (harmonized files in processed directory)
-    surv_file = Path('data/processed') / f"surv_{cohort_name}_harmonized.csv"
-    if not surv_file.exists():
-        # Try raw directory
-        surv_file = data_path / f"surv_{cohort_name}_update.csv" if cohort_name == 'orien' else data_path / f"surv_{cohort_name}.csv"
-        if not surv_file.exists():
-            raise FileNotFoundError(f"Could not find survival data for {cohort_name}")
+    with open(consensus_gene_file, 'r') as f:
+        consensus_genes = [line.strip() for line in f if line.strip()]
+    
+    print(f"Consensus gene list: {len(consensus_genes)} genes")
+    
+    # Filter to available consensus genes
+    available_genes = [g for g in consensus_genes if g in expression.index]
+    missing_genes = set(consensus_genes) - set(available_genes)
+    
+    if missing_genes:
+        print(f"⚠️  Missing {len(missing_genes)} genes from consensus list")
+    
+    expression = expression.loc[available_genes]
+    print(f"After consensus filter: {len(expression)} genes × {expression.shape[1]} samples")
+    print(f"✓ Using same 308 consensus genes as Chapter 3")
+    
+    # Verify we have 308 genes (or close to it)
+    if len(expression) < 300:
+        raise ValueError(
+            f"Expected ~308 consensus genes, but only found {len(expression)} genes.\n"
+            f"Check your consensus gene file: {consensus_gene_file}"
+        )
+    
+    # Load survival data
+    if not Path(surv_file).exists():
+        raise FileNotFoundError(f"Could not find survival data: {surv_file}")
     
     survival = pd.read_csv(surv_file)
     if 'sampleID' in survival.columns:
         survival = survival.set_index('sampleID')
     
-    print(f"Loaded {cohort_name.upper()} data:")
+    # Align samples (only keep samples present in both expression and survival)
+    common_samples = list(set(expression.columns) & set(survival.index))
+    common_samples = sorted(common_samples)
+    
+    expression = expression[common_samples]
+    survival = survival.loc[common_samples]
+    
+    print(f"\nFinal {cohort_name.upper()} dataset:")
     print(f"  Expression: {expression.shape} (genes × samples)")
-    print(f"  ✓ Verified: 308 consensus genes (same as Chapter 3)")
     print(f"  Survival: {len(survival)} samples")
     print(f"  Events: {survival['event'].sum()} ({100*survival['event'].mean():.1f}%)")
+    print()
     
     return {
         'expression': expression,
@@ -716,10 +746,6 @@ Examples:
                        help='Path to source cohort best_params.json')
     parser.add_argument('--target_params', type=str, required=True,
                        help='Path to target cohort best_params.json')
-    
-    # Data directory
-    parser.add_argument('--data_dir', type=str, default='data/processed',
-                       help='Directory containing preprocessed data (default: data/processed)')
     
     # Training parameters
     parser.add_argument('--pretrain_epochs', type=int, default=100,
@@ -779,8 +805,8 @@ Examples:
     
     # Load data
     print("Loading cohort data...")
-    source_data = load_cohort_data(args.source_cohort, args.data_dir)
-    target_data = load_cohort_data(args.target_cohort, args.data_dir)
+    source_data = load_cohort_data(args.source_cohort)
+    target_data = load_cohort_data(args.target_cohort)
     print()
     
     # Verify same number of genes
