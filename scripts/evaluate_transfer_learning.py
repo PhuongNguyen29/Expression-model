@@ -358,6 +358,37 @@ def evaluate_transfer_learning(
     # Get training metrics from checkpoint
     tcga_transfer_train_cindex = tcga_transfer_checkpoint['finetune_metrics']['c_index']
     
+    # Load reverse direction if provided (TCGA→ORIEN)
+    orien_transfer_model = None
+    orien_transfer_train_cindex = None
+    
+    if reverse_transfer_dir:
+        print(f"\nLoading reverse transfer model (TCGA→ORIEN)...")
+        reverse_path = Path(reverse_transfer_dir)
+        orien_transfer_file = reverse_path / f"orien_finetuned_seed{seed}.pth"
+        
+        if orien_transfer_file.exists():
+            orien_transfer_checkpoint = torch.load(orien_transfer_file, map_location='cpu')
+            
+            # Create model with TCGA architecture (source for this direction)
+            orien_transfer_model = ElasticDeepSurv(
+                n_features=orien_data['expression'].shape[0],
+                hidden_sizes=tcga_params['hidden_sizes'],  # Use TCGA architecture
+                dropout=tcga_params.get('dropout', 0.3),
+                l1_ratio=tcga_params.get('l1_ratio', 0.7),
+                alpha=tcga_params.get('alpha', 0.01)
+            )
+            
+            orien_transfer_model.load_state_dict(orien_transfer_checkpoint['model_state_dict'])
+            orien_transfer_train_cindex = orien_transfer_checkpoint['finetune_metrics']['c_index']
+            
+            print(f"✓ Loaded TCGA→ORIEN transfer model")
+            print(f"  Architecture: {tcga_params['hidden_sizes']} (inherited from TCGA)")
+        else:
+            print(f"⚠️  Reverse transfer model not found: {orien_transfer_file}")
+    else:
+        print(f"\n⚠️  Reverse transfer directory not provided, skipping TCGA→ORIEN evaluation")
+    
     # ========================================
     # Train Baseline Models (From Scratch)
     # ========================================
@@ -416,6 +447,15 @@ def evaluate_transfer_learning(
     )
     print(f"  Baseline C-index: {baseline_orien_on_tcga:.4f}")
     
+    # Transfer: ORIEN transfer model tested on TCGA (if available)
+    transfer_orien_on_tcga = None
+    if orien_transfer_model:
+        print("\nEvaluating ORIEN transfer model on TCGA...")
+        transfer_orien_on_tcga = evaluate_model_cross_cohort(
+            orien_transfer_model, tcga_data, device
+        )
+        print(f"  Transfer C-index: {transfer_orien_on_tcga:.4f}")
+    
     # ========================================
     # Compute Improvements
     # ========================================
@@ -423,18 +463,41 @@ def evaluate_transfer_learning(
     improvement_tcga = transfer_tcga_on_orien - baseline_tcga_on_orien
     improvement_pct_tcga = (improvement_tcga / baseline_tcga_on_orien) * 100
     
+    improvement_orien = None
+    improvement_pct_orien = None
+    avg_improvement = None
+    
+    if transfer_orien_on_tcga:
+        improvement_orien = transfer_orien_on_tcga - baseline_orien_on_tcga
+        improvement_pct_orien = (improvement_orien / baseline_orien_on_tcga) * 100
+        
+        # Compute bidirectional average
+        baseline_avg = (baseline_tcga_on_orien + baseline_orien_on_tcga) / 2
+        transfer_avg = (transfer_tcga_on_orien + transfer_orien_on_tcga) / 2
+        avg_improvement = transfer_avg - baseline_avg
+    
     print(f"\n{'='*60}")
     print("RESULTS SUMMARY")
     print(f"{'='*60}\n")
     
-    print("Direction: TCGA model tested on ORIEN")
+    print("Direction 1: TCGA model tested on ORIEN (ORIEN→TCGA transfer)")
     print(f"  Baseline (from scratch): {baseline_tcga_on_orien:.4f}")
     print(f"  Transfer learning:       {transfer_tcga_on_orien:.4f}")
     print(f"  Improvement:             {improvement_tcga:+.4f} ({improvement_pct_tcga:+.1f}%)")
     
-    print("\nDirection: ORIEN model tested on TCGA")
+    print("\nDirection 2: ORIEN model tested on TCGA (TCGA→ORIEN transfer)")
     print(f"  Baseline (from scratch): {baseline_orien_on_tcga:.4f}")
-    print(f"  (Transfer not computed in this direction yet)")
+    if transfer_orien_on_tcga:
+        print(f"  Transfer learning:       {transfer_orien_on_tcga:.4f}")
+        print(f"  Improvement:             {improvement_orien:+.4f} ({improvement_pct_orien:+.1f}%)")
+    else:
+        print(f"  Transfer learning:       Not computed")
+    
+    if avg_improvement is not None:
+        print(f"\nBidirectional Average:")
+        print(f"  Baseline: {baseline_avg:.4f}")
+        print(f"  Transfer: {transfer_avg:.4f}")
+        print(f"  Improvement: {avg_improvement:+.4f} ({avg_improvement/baseline_avg*100:+.1f}%)")
     
     # ========================================
     # Compare with Chapter 3 Best Results
