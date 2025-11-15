@@ -58,33 +58,35 @@ def compute_statistics(results: List[Dict]) -> Dict:
     seeds = [r['seed'] for r in results]
     n_seeds = len(results)
     
-    # Baseline metrics
+    # Baseline metrics (always present)
     baseline_tcga_on_orien = [r['baseline']['tcga_on_orien'] for r in results]
     baseline_orien_on_tcga = [r['baseline']['orien_on_tcga'] for r in results]
+    baseline_avg = [(r['baseline']['tcga_on_orien'] + r['baseline']['orien_on_tcga']) / 2 
+                    for r in results]
     
-    # Compute baseline average if not present
-    baseline_avg = []
-    for r in results:
-        if 'average' in r['baseline']:
-            baseline_avg.append(r['baseline']['average'])
-        else:
-            # Compute it from the two directions
-            avg = (r['baseline']['tcga_on_orien'] + r['baseline']['orien_on_tcga']) / 2
-            baseline_avg.append(avg)
-    
-    # Transfer metrics
+    # Transfer metrics for direction 1 (always present)
     transfer_tcga_on_orien = [r['transfer']['tcga_on_orien'] for r in results]
-    transfer_orien_on_tcga = [r['transfer']['orien_on_tcga'] for r in results]
     
-    # Compute transfer average if not present
-    transfer_avg = []
+    # Transfer metrics for direction 2 (may be missing)
+    transfer_orien_on_tcga = []
+    has_reverse_direction = []
     for r in results:
-        if 'average' in r['transfer'] and r['transfer']['average'] is not None:
-            transfer_avg.append(r['transfer']['average'])
+        if 'orien_on_tcga' in r['transfer'] and r['transfer']['orien_on_tcga'] is not None:
+            transfer_orien_on_tcga.append(r['transfer']['orien_on_tcga'])
+            has_reverse_direction.append(True)
         else:
-            # Compute it from the two directions
+            has_reverse_direction.append(False)
+    
+    # Compute transfer average only for seeds with both directions
+    transfer_avg = []
+    for i, r in enumerate(results):
+        if has_reverse_direction[i]:
             avg = (r['transfer']['tcga_on_orien'] + r['transfer']['orien_on_tcga']) / 2
             transfer_avg.append(avg)
+    
+    # Check if we have reverse direction data
+    n_reverse = sum(has_reverse_direction)
+    has_full_bidirectional = n_reverse > 0
     
     # Compute improvements
     improvement_tcga = np.array(transfer_tcga_on_orien) - np.array(baseline_tcga_on_orien)
@@ -315,8 +317,24 @@ def main():
     
     # Save results
     output_file = results_dir / 'multiseed_summary.json'
+    
+    # Convert numpy types to native Python types for JSON serialization
+    def convert_to_native(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.floating)):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {k: convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_native(item) for item in obj]
+        else:
+            return obj
+    
+    stats_serializable = convert_to_native(stats)
+    
     with open(output_file, 'w') as f:
-        json.dump(stats, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        json.dump(stats_serializable, f, indent=2)
     
     table_file = results_dir / 'summary_table.csv'
     table.to_csv(table_file, index=False)
