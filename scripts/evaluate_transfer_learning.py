@@ -535,6 +535,12 @@ def evaluate_transfer_learning(
     # Save Results
     # ========================================
     
+    # Debug: Print what we're about to save
+    print(f"\n[DEBUG] About to save results:")
+    print(f"  transfer_orien_on_tcga: {transfer_orien_on_tcga}")
+    print(f"  orien_transfer_train_cindex: {orien_transfer_train_cindex}")
+    print(f"  transfer_avg: {transfer_avg}")
+    
     results = {
         'seed': seed,
         'n_genes': tcga_data['expression'].shape[0],
@@ -548,7 +554,7 @@ def evaluate_transfer_learning(
         'transfer': {
             'tcga_on_orien': transfer_tcga_on_orien,
             'orien_on_tcga': transfer_orien_on_tcga,
-            'average': transfer_avg if transfer_orien_on_tcga else None,
+            'average': transfer_avg,
             'tcga_train_cindex': tcga_transfer_train_cindex,
             'orien_train_cindex': orien_transfer_train_cindex
         },
@@ -570,10 +576,15 @@ def evaluate_transfer_learning(
         }
     }
     
+    print(f"[DEBUG] Results dict keys: {results.keys()}")
+    print(f"[DEBUG] Transfer keys: {results['transfer'].keys()}")
+    
     # Save to JSON
     results_file = output_dir / 'evaluation_results.json'
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
+    
+    print(f"[DEBUG] JSON saved to: {results_file}")
     
     print(f"\n{'='*60}")
     print(f"Results saved to: {results_file}")
