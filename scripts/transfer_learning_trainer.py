@@ -41,9 +41,6 @@ import torch.nn as nn
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.models.model_factory import ModelFactory
-from src.data.data_factory import DataFactory
-
 
 # ============================================================================
 # STEP 1: CHECKPOINT MANAGEMENT FUNCTIONS
