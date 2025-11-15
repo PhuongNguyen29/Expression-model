@@ -32,15 +32,20 @@ import json
 import argparse
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Note: We don't need ModelFactory or DataFactory here because we:
+# - Load data directly using pandas (see load_cohort_data function)
+# - Create models directly using ElasticDeepSurv class
+# These imports will be done inside the functions where needed
 
 
 # ============================================================================
@@ -555,45 +560,112 @@ def load_hyperparameters(params_path: str) -> Dict:
         params_path: Path to best_params.json from Chapter 3
         
     Returns:
-        Dictionary with hyperparameters
+        Dictionary with hyperparameters in model-compatible format
     """
     with open(params_path, 'r') as f:
         params = json.load(f)
+    
+    # Convert your Optuna hyperparameter format to model format
+    params = parse_optuna_params(params)
+    
     return params
 
 
-def load_cohort_data(cohort_name: str, data_dir: str = 'data/processed') -> Dict:
+def parse_optuna_params(optuna_params: Dict) -> Dict:
+    """
+    Convert Optuna hyperparameter format from Chapter 3 to model-compatible format.
+    
+    Your Chapter 3 format:
+        - n_layers: 1 or 2
+        - layer1_size: int (for 1-layer)
+        - architecture_2layer: "256-64" (for 2-layer)
+    
+    Model expects:
+        - hidden_sizes: [256] or [256, 64]
+    
+    Args:
+        optuna_params: Dict from best_params.json
+        
+    Returns:
+        Dict with converted parameters
+    """
+    params = optuna_params.copy()
+    
+    # Parse architecture based on n_layers
+    n_layers = params.get('n_layers', 1)
+    
+    if n_layers == 1:
+        # Single layer: use layer1_size
+        layer1_size = params.get('layer1_size', 128)
+        hidden_sizes = [layer1_size]
+    elif n_layers == 2:
+        # Two layers: parse architecture_2layer string
+        arch_str = params.get('architecture_2layer', '256-64')
+        hidden_sizes = [int(x) for x in arch_str.split('-')]
+    else:
+        raise ValueError(f"Unsupported n_layers: {n_layers}")
+    
+    # Add to params dict
+    params['hidden_sizes'] = hidden_sizes
+    
+    # Log the conversion
+    print(f"  Parsed architecture: n_layers={n_layers} → hidden_sizes={hidden_sizes}")
+    
+    return params
+
+
+def load_cohort_data(cohort_name: str, data_dir: str = 'data/raw') -> Dict:
     """
     Load expression and survival data for a cohort.
     
+    CRITICAL: This loads the SAME 308 consensus genes used in Chapter 3
+    for fair comparison with baseline results.
+    
     Args:
         cohort_name: 'tcga' or 'orien'
-        data_dir: Directory containing processed data
+        data_dir: Directory containing data files (default: 'data/raw')
         
     Returns:
         Dict with 'expression' and 'survival' DataFrames
     """
     data_path = Path(data_dir)
     
-    # Load expression data (genes × samples)
-    expr_file = data_path / f"{cohort_name}_preprocessed.csv"
+    # Load 308 consensus gene expression data (SAME as Chapter 3)
+    # These files should contain only the 308 genes used in your experiments
+    expr_file = data_path / f"{cohort_name}_consensus_308.csv"
+    
     if not expr_file.exists():
-        # Try alternate naming
-        expr_file = data_path / f"{cohort_name}_consensus_308.csv"
-        if not expr_file.exists():
-            raise FileNotFoundError(f"Could not find expression data for {cohort_name}")
+        raise FileNotFoundError(
+            f"Could not find consensus gene file: {expr_file}\n"
+            f"Expected file with 308 genes used in Chapter 3.\n"
+            f"Available files in {data_path}:\n" + 
+            "\n".join([f"  - {f.name}" for f in data_path.glob(f"{cohort_name}*.csv")])
+        )
     
     expression = pd.read_csv(expr_file, index_col=0)
     
-    # Load survival data
-    surv_file = data_path / f"surv_{cohort_name}_harmonized.csv"
-    if not surv_file.exists():
-        raise FileNotFoundError(f"Could not find survival data for {cohort_name}")
+    # Verify we have 308 genes
+    if expression.shape[0] != 308:
+        raise ValueError(
+            f"Expected 308 consensus genes, but found {expression.shape[0]} genes in {expr_file}\n"
+            f"Transfer learning requires the SAME gene set as Chapter 3 for fair comparison."
+        )
     
-    survival = pd.read_csv(surv_file, index_col=0)
+    # Load survival data (harmonized files in processed directory)
+    surv_file = Path('data/processed') / f"surv_{cohort_name}_harmonized.csv"
+    if not surv_file.exists():
+        # Try raw directory
+        surv_file = data_path / f"surv_{cohort_name}_update.csv" if cohort_name == 'orien' else data_path / f"surv_{cohort_name}.csv"
+        if not surv_file.exists():
+            raise FileNotFoundError(f"Could not find survival data for {cohort_name}")
+    
+    survival = pd.read_csv(surv_file)
+    if 'sampleID' in survival.columns:
+        survival = survival.set_index('sampleID')
     
     print(f"Loaded {cohort_name.upper()} data:")
     print(f"  Expression: {expression.shape} (genes × samples)")
+    print(f"  ✓ Verified: 308 consensus genes (same as Chapter 3)")
     print(f"  Survival: {len(survival)} samples")
     print(f"  Events: {survival['event'].sum()} ({100*survival['event'].mean():.1f}%)")
     
