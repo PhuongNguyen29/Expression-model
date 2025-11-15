@@ -61,12 +61,30 @@ def compute_statistics(results: List[Dict]) -> Dict:
     # Baseline metrics
     baseline_tcga_on_orien = [r['baseline']['tcga_on_orien'] for r in results]
     baseline_orien_on_tcga = [r['baseline']['orien_on_tcga'] for r in results]
-    baseline_avg = [r['baseline']['average'] for r in results]
+    
+    # Compute baseline average if not present
+    baseline_avg = []
+    for r in results:
+        if 'average' in r['baseline']:
+            baseline_avg.append(r['baseline']['average'])
+        else:
+            # Compute it from the two directions
+            avg = (r['baseline']['tcga_on_orien'] + r['baseline']['orien_on_tcga']) / 2
+            baseline_avg.append(avg)
     
     # Transfer metrics
     transfer_tcga_on_orien = [r['transfer']['tcga_on_orien'] for r in results]
     transfer_orien_on_tcga = [r['transfer']['orien_on_tcga'] for r in results]
-    transfer_avg = [r['transfer']['average'] for r in results]
+    
+    # Compute transfer average if not present
+    transfer_avg = []
+    for r in results:
+        if 'average' in r['transfer'] and r['transfer']['average'] is not None:
+            transfer_avg.append(r['transfer']['average'])
+        else:
+            # Compute it from the two directions
+            avg = (r['transfer']['tcga_on_orien'] + r['transfer']['orien_on_tcga']) / 2
+            transfer_avg.append(avg)
     
     # Compute improvements
     improvement_tcga = np.array(transfer_tcga_on_orien) - np.array(baseline_tcga_on_orien)
