@@ -341,16 +341,19 @@ def evaluate_transfer_learning(
     tcga_transfer_checkpoint = torch.load(tcga_transfer_file, map_location='cpu')
     
     # Create model and load weights
+    # CRITICAL: Transfer-learned model uses SOURCE architecture (ORIEN)
+    # because it was pre-trained on ORIEN, then fine-tuned on TCGA
     tcga_transfer_model = ElasticDeepSurv(
         n_features=tcga_data['expression'].shape[0],
-        hidden_sizes=tcga_params['hidden_sizes'],
-        dropout=tcga_params.get('dropout', 0.3),
-        l1_ratio=tcga_params.get('l1_ratio', 0.7),
-        alpha=tcga_params.get('alpha', 0.01)
+        hidden_sizes=orien_params['hidden_sizes'],  # ← Use ORIEN architecture!
+        dropout=orien_params.get('dropout', 0.3),
+        l1_ratio=orien_params.get('l1_ratio', 0.7),
+        alpha=orien_params.get('alpha', 0.01)
     )
     
     tcga_transfer_model.load_state_dict(tcga_transfer_checkpoint['model_state_dict'])
     print(f"✓ Loaded ORIEN→TCGA transfer model")
+    print(f"  Architecture: {orien_params['hidden_sizes']} (inherited from ORIEN)")
     
     # Get training metrics from checkpoint
     tcga_transfer_train_cindex = tcga_transfer_checkpoint['finetune_metrics']['c_index']
