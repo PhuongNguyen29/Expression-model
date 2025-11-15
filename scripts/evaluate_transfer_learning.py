@@ -466,13 +466,14 @@ def evaluate_transfer_learning(
     improvement_orien = None
     improvement_pct_orien = None
     avg_improvement = None
+    transfer_avg = None  # Initialize here
+    baseline_avg = (baseline_tcga_on_orien + baseline_orien_on_tcga) / 2  # Always compute
     
     if transfer_orien_on_tcga:
         improvement_orien = transfer_orien_on_tcga - baseline_orien_on_tcga
         improvement_pct_orien = (improvement_orien / baseline_orien_on_tcga) * 100
         
         # Compute bidirectional average
-        baseline_avg = (baseline_tcga_on_orien + baseline_orien_on_tcga) / 2
         transfer_avg = (transfer_tcga_on_orien + transfer_orien_on_tcga) / 2
         avg_improvement = transfer_avg - baseline_avg
     
@@ -540,21 +541,32 @@ def evaluate_transfer_learning(
         'baseline': {
             'tcga_on_orien': baseline_tcga_on_orien,
             'orien_on_tcga': baseline_orien_on_tcga,
+            'average': baseline_avg,
             'tcga_train_cindex': tcga_baseline_train_cindex,
             'orien_train_cindex': orien_baseline_train_cindex
         },
         'transfer': {
             'tcga_on_orien': transfer_tcga_on_orien,
-            'tcga_train_cindex': tcga_transfer_train_cindex
+            'orien_on_tcga': transfer_orien_on_tcga,
+            'average': transfer_avg if transfer_orien_on_tcga else None,
+            'tcga_train_cindex': tcga_transfer_train_cindex,
+            'orien_train_cindex': orien_transfer_train_cindex
         },
         'improvement': {
             'tcga_on_orien_absolute': improvement_tcga,
-            'tcga_on_orien_percent': improvement_pct_tcga
+            'tcga_on_orien_percent': improvement_pct_tcga,
+            'orien_on_tcga_absolute': improvement_orien,
+            'orien_on_tcga_percent': improvement_pct_orien,
+            'average_absolute': avg_improvement
         },
         'chapter3_comparison': {
             'chapter3_best_avg': chapter3_best['k95_avg'],
-            'chapter4_transfer': transfer_tcga_on_orien,
-            'difference': transfer_tcga_on_orien - chapter3_best['k95_tcga_on_orien']
+            'chapter3_tcga_on_orien': chapter3_best['k95_tcga_on_orien'],
+            'chapter3_orien_on_tcga': chapter3_best['k95_orien_on_tcga'],
+            'chapter4_tcga_on_orien': transfer_tcga_on_orien,
+            'chapter4_orien_on_tcga': transfer_orien_on_tcga,
+            'improvement_tcga_direction': transfer_tcga_on_orien - chapter3_best['k95_tcga_on_orien'],
+            'improvement_orien_direction': (transfer_orien_on_tcga - chapter3_best['k95_orien_on_tcga']) if transfer_orien_on_tcga else None
         }
     }
     

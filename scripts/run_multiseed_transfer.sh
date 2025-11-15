@@ -77,19 +77,27 @@ for SEED in "${SEEDS[@]}"; do
     echo ""
     echo "[3/3] Evaluating transfer learning (seed=$SEED)..."
     
-    python scripts/evaluate_transfer_learning.py \
+    # Capture output to get the results file path
+    EVAL_OUTPUT=$(python scripts/evaluate_transfer_learning.py \
         --transfer_dir "$ORIEN_TO_TCGA_DIR" \
         --reverse_transfer_dir "$TCGA_TO_ORIEN_DIR" \
         --seed "$SEED" \
         --device "$DEVICE" \
-        2>&1 | tee "$RESULTS_DIR/logs/evaluation_seed${SEED}.log"
+        2>&1 | tee "$RESULTS_DIR/logs/evaluation_seed${SEED}.log")
     
-    # Store the evaluation directory path
-    EVAL_DIR=$(ls -td results/transfer_learning_evaluation_* | head -1)
-    echo "✓ Evaluation saved to: $EVAL_DIR"
+    # Extract the results file path from output
+    RESULTS_FILE=$(echo "$EVAL_OUTPUT" | grep "Results saved to:" | sed 's/.*Results saved to: //')
     
-    # Copy evaluation results to our multi-seed directory
-    cp "$EVAL_DIR/evaluation_results.json" "$RESULTS_DIR/seed${SEED}_results.json"
+    if [ -f "$RESULTS_FILE" ]; then
+        # Copy evaluation results to our multi-seed directory
+        cp "$RESULTS_FILE" "$RESULTS_DIR/seed${SEED}_results.json"
+        echo "✓ Copied results to: $RESULTS_DIR/seed${SEED}_results.json"
+    else
+        echo "⚠️  Warning: Could not find results file at: $RESULTS_FILE"
+        # Fallback to old method
+        EVAL_DIR=$(ls -td results/transfer_learning_evaluation_* | head -1)
+        cp "$EVAL_DIR/evaluation_results.json" "$RESULTS_DIR/seed${SEED}_results.json"
+    fi
     
     echo ""
     echo "✓ Completed seed $SEED"
