@@ -94,27 +94,54 @@ def get_top_k_genes(
 def load_model_and_extract_genes(
     model_path: Path,
     gene_names: List[str],
-    architecture: List[int],
     top_k: int = 50
 ) -> Tuple[np.ndarray, List[str]]:
     """
     Load a trained model and extract top genes.
     
+    Automatically detects architecture from checkpoint.
+    
     Args:
         model_path: Path to model checkpoint
-        gene_names: List of gene names (308 genes)
-        architecture: Model architecture (e.g., [256, 64])
+        gene_names: List of gene names (should match checkpoint)
         top_k: Number of top genes to extract
         
     Returns:
         (importance_scores, top_k_genes)
     """
     # Load checkpoint
-    checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     
-    # Create model
+    # Detect architecture from state dict
+    state_dict = checkpoint['model_state_dict']
+    
+    # Get input features from first layer
+    first_layer_key = [k for k in state_dict.keys() if '.weight' in k and ('fc0' in k or 'network.0' in k)][0]
+    first_layer_shape = state_dict[first_layer_key].shape
+    n_features = first_layer_shape[1]  # Input dimension
+    first_hidden = first_layer_shape[0]  # First hidden layer size
+    
+    # Detect if there's a second hidden layer
+    second_layer_keys = [k for k in state_dict.keys() if '.weight' in k and ('fc1' in k or 'network.2' in k)]
+    
+    if second_layer_keys:
+        second_layer_shape = state_dict[second_layer_keys[0]].shape
+        second_hidden = second_layer_shape[0]
+        architecture = [first_hidden, second_hidden]
+    else:
+        architecture = [first_hidden]
+    
+    print(f"      Detected architecture: {n_features} → {architecture}")
+    
+    # Verify gene count matches
+    if n_features != len(gene_names):
+        print(f"      ⚠️  WARNING: Model has {n_features} features but {len(gene_names)} genes provided")
+        print(f"      This model appears to be from a different experiment")
+        return None, None
+    
+    # Create model with detected architecture
     model = ElasticDeepSurv(
-        n_features=len(gene_names),
+        n_features=n_features,
         hidden_sizes=architecture,
         dropout=0.3,
         l1_ratio=0.7,
@@ -122,7 +149,7 @@ def load_model_and_extract_genes(
     )
     
     # Load weights
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(state_dict)
     model.eval()
     
     # Compute importance
@@ -266,16 +293,17 @@ def extract_biomarkers(
         if tcga_dirs:
             tcga_model_path = tcga_dirs[0] / f"tcga_finetuned_seed{seed}.pth"
             if tcga_model_path.exists():
-                # TCGA models use ORIEN architecture [256, 64]
                 importance, top_genes = load_model_and_extract_genes(
                     tcga_model_path,
                     gene_names,
-                    architecture=[256, 64],
                     top_k=top_k
                 )
-                tcga_transfer_genes.append(top_genes)
-                tcga_importance_scores.append(importance)
-                print(f"    ✓ TCGA transfer: {len(top_genes)} genes extracted")
+                if top_genes is not None:  # Check if loading was successful
+                    tcga_transfer_genes.append(top_genes)
+                    tcga_importance_scores.append(importance)
+                    print(f"    ✓ TCGA transfer: {len(top_genes)} genes extracted")
+                else:
+                    print(f"    ✗ TCGA transfer: Skipped (architecture mismatch)")
         
         # TCGA→ORIEN: tcga_to_orien_seed{X}_*/orien_finetuned_seed{X}.pth
         orien_model_pattern = f"tcga_to_orien_seed{seed}_*"
@@ -284,16 +312,17 @@ def extract_biomarkers(
         if orien_dirs:
             orien_model_path = orien_dirs[0] / f"orien_finetuned_seed{seed}.pth"
             if orien_model_path.exists():
-                # ORIEN models use TCGA architecture [256]
                 importance, top_genes = load_model_and_extract_genes(
                     orien_model_path,
                     gene_names,
-                    architecture=[256],
                     top_k=top_k
                 )
-                orien_transfer_genes.append(top_genes)
-                orien_importance_scores.append(importance)
-                print(f"    ✓ ORIEN transfer: {len(top_genes)} genes extracted")
+                if top_genes is not None:  # Check if loading was successful
+                    orien_transfer_genes.append(top_genes)
+                    orien_importance_scores.append(importance)
+                    print(f"    ✓ ORIEN transfer: {len(top_genes)} genes extracted")
+                else:
+                    print(f"    ✗ ORIEN transfer: Skipped (architecture mismatch)")
     
     print(f"\n✓ Extracted genes from {len(tcga_transfer_genes)} TCGA models")
     print(f"✓ Extracted genes from {len(orien_transfer_genes)} ORIEN models")
