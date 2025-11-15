@@ -240,7 +240,12 @@ def train_source_model(
     output_dir='results/transfer_learning'
 ):
     """
-    Pre-train model on source cohort (typically ORIEN - the larger cohort).
+    Pre-train model on ENTIRE source cohort (typically ORIEN - the larger cohort).
+    
+    MATCHES CHAPTER 3 METHODOLOGY:
+    - Trains on the FULL cohort (no train/validation split)
+    - Uses early stopping based on training C-index
+    - This matches how you trained models in extract_biomarkers_from_best_params.py
     
     This is STEP 1 of transfer learning: training from scratch on the source
     cohort to learn general survival patterns from genomic data.
@@ -263,13 +268,13 @@ def train_source_model(
         - Pre-training on large source dataset provides good initialization
     """
     print(f"\n{'='*60}")
-    print("STEP 1: PRE-TRAINING ON SOURCE COHORT")
+    print("STEP 1: PRE-TRAINING ON ENTIRE SOURCE COHORT")
     print(f"{'='*60}")
     
     # Set random seeds
     set_all_seeds(seed)
     
-    # Create datasets
+    # Create dataset from ENTIRE cohort (no split)
     from src.data.dataset import SurvivalDataset
     from torch.utils.data import DataLoader
     from src.utils.batch_samplers import StratifiedBatchSampler
@@ -279,34 +284,21 @@ def train_source_model(
         source_data['survival']
     )
     
-    print(f"Source dataset: {len(source_dataset)} samples, "
-          f"{source_dataset.n_features} features")
-    print(f"Event rate: {source_dataset.y_event.mean():.2%}")
+    print(f"Source dataset: {len(source_dataset)} samples (FULL cohort, no validation split)")
+    print(f"  Features: {source_dataset.n_features} genes")
+    print(f"  Event rate: {source_dataset.y_event.mean():.2%}")
+    print(f"  ⚠️  Training on ENTIRE cohort to match Chapter 3 methodology")
     
-    # Create train/validation split
-    train_dataset, valid_dataset = source_dataset.create_train_valid_split(
-        valid_size=0.2,
-        random_seed=seed
-    )
-    
-    # Create data loaders with stratified sampling
+    # Create data loader for full dataset
     train_sampler = StratifiedBatchSampler(
-        events=source_dataset.y_event[train_dataset.indices],
+        events=source_dataset.y_event,
         batch_size=source_params.get('batch_size', 32),
         shuffle=True
     )
     
     train_loader = DataLoader(
-        train_dataset,
+        source_dataset,
         batch_sampler=train_sampler,
-        num_workers=0,
-        pin_memory=True if device == 'cuda' else False
-    )
-    
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=source_params.get('batch_size', 32),
-        shuffle=False,
         num_workers=0,
         pin_memory=True if device == 'cuda' else False
     )
@@ -343,15 +335,16 @@ def train_source_model(
     print(f"  Learning rate: {learning_rate}")
     print(f"  Early stopping patience: 20")
     print(f"  Device: {device}")
+    print(f"  Validation: None (training on full cohort)")
     
-    # Train model
+    # Train model on ENTIRE cohort
     print(f"\n{'='*60}")
-    print("Starting pre-training...")
+    print("Starting pre-training on full cohort...")
     print(f"{'='*60}\n")
     
     history = trainer.fit(
         train_loader=train_loader,
-        valid_loader=valid_loader,
+        valid_loader=None,  # No validation - train on full cohort
         n_epochs=n_epochs,
         early_stopping_patience=20,
         verbose=True
@@ -359,7 +352,6 @@ def train_source_model(
     
     # Get final metrics
     final_train_cindex = history['train_cindex'][-1]
-    final_valid_cindex = history['valid_c_index'][-1]
     best_epoch = history.get('best_epoch', len(history['train_cindex']))
     
     print(f"\n{'='*60}")
@@ -367,12 +359,11 @@ def train_source_model(
     print(f"{'='*60}")
     print(f"Best epoch: {best_epoch}")
     print(f"Final training C-index: {final_train_cindex:.4f}")
-    print(f"Final validation C-index: {final_valid_cindex:.4f}")
     print(f"{'='*60}\n")
     
     # Prepare metrics for saving
     train_metrics = {
-        'c_index': final_valid_cindex,
+        'c_index': final_train_cindex,
         'train_c_index': final_train_cindex,
         'best_epoch': best_epoch,
         'history': history
@@ -392,7 +383,11 @@ def finetune_target_model(
     output_dir='results/transfer_learning'
 ):
     """
-    Fine-tune pre-trained model on target cohort (typically TCGA - the smaller cohort).
+    Fine-tune pre-trained model on ENTIRE target cohort (typically TCGA - the smaller cohort).
+    
+    MATCHES CHAPTER 3 METHODOLOGY:
+    - Trains on the FULL cohort (no train/validation split)
+    - Uses early stopping based on training C-index
     
     This is STEP 2 of transfer learning: adapting the pre-trained model to the
     target cohort while preserving learned knowledge from source cohort.
@@ -420,13 +415,13 @@ def finetune_target_model(
         - Fewer epochs needed as model starts from good initialization
     """
     print(f"\n{'='*60}")
-    print("STEP 2: FINE-TUNING ON TARGET COHORT")
+    print("STEP 2: FINE-TUNING ON ENTIRE TARGET COHORT")
     print(f"{'='*60}")
     
     # Set random seeds
     set_all_seeds(seed)
     
-    # Create datasets
+    # Create dataset from ENTIRE cohort (no split)
     from src.data.dataset import SurvivalDataset
     from torch.utils.data import DataLoader
     from src.utils.batch_samplers import StratifiedBatchSampler
@@ -436,9 +431,10 @@ def finetune_target_model(
         target_data['survival']
     )
     
-    print(f"Target dataset: {len(target_dataset)} samples, "
-          f"{target_dataset.n_features} features")
-    print(f"Event rate: {target_dataset.y_event.mean():.2%}")
+    print(f"Target dataset: {len(target_dataset)} samples (FULL cohort, no validation split)")
+    print(f"  Features: {target_dataset.n_features} genes")
+    print(f"  Event rate: {target_dataset.y_event.mean():.2%}")
+    print(f"  ⚠️  Training on ENTIRE cohort to match Chapter 3 methodology")
     
     # Verify architecture compatibility
     if target_dataset.n_features != pretrained_model.network[0].in_features:
@@ -451,30 +447,16 @@ def finetune_target_model(
     
     print(f"✓ Architecture compatible: {target_dataset.n_features} genes")
     
-    # Create train/validation split
-    train_dataset, valid_dataset = target_dataset.create_train_valid_split(
-        valid_size=0.2,
-        random_seed=seed
-    )
-    
-    # Create data loaders
+    # Create data loader for full dataset
     train_sampler = StratifiedBatchSampler(
-        events=target_dataset.y_event[train_dataset.indices],
+        events=target_dataset.y_event,
         batch_size=target_params.get('batch_size', 32),
         shuffle=True
     )
     
     train_loader = DataLoader(
-        train_dataset,
+        target_dataset,
         batch_sampler=train_sampler,
-        num_workers=0,
-        pin_memory=True if device == 'cuda' else False
-    )
-    
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=target_params.get('batch_size', 32),
-        shuffle=False,
         num_workers=0,
         pin_memory=True if device == 'cuda' else False
     )
@@ -496,16 +478,17 @@ def finetune_target_model(
     print(f"  Learning rate: {learning_rate} (vs {1e-4} for pre-training)")
     print(f"  Early stopping patience: 15")
     print(f"  Device: {device}")
+    print(f"  Validation: None (training on full cohort)")
     print(f"\n⚠️  Using 10× smaller LR to preserve pre-trained knowledge")
     
-    # Fine-tune model
+    # Fine-tune model on ENTIRE cohort
     print(f"\n{'='*60}")
-    print("Starting fine-tuning...")
+    print("Starting fine-tuning on full cohort...")
     print(f"{'='*60}\n")
     
     history = trainer.fit(
         train_loader=train_loader,
-        valid_loader=valid_loader,
+        valid_loader=None,  # No validation - train on full cohort
         n_epochs=n_epochs,
         early_stopping_patience=15,  # Slightly less patience for fine-tuning
         verbose=True
@@ -513,7 +496,6 @@ def finetune_target_model(
     
     # Get final metrics
     final_train_cindex = history['train_cindex'][-1]
-    final_valid_cindex = history['valid_c_index'][-1]
     best_epoch = history.get('best_epoch', len(history['train_cindex']))
     
     print(f"\n{'='*60}")
@@ -521,12 +503,11 @@ def finetune_target_model(
     print(f"{'='*60}")
     print(f"Best epoch: {best_epoch}")
     print(f"Final training C-index: {final_train_cindex:.4f}")
-    print(f"Final validation C-index: {final_valid_cindex:.4f}")
     print(f"{'='*60}\n")
     
     # Prepare metrics
     finetune_metrics = {
-        'c_index': final_valid_cindex,
+        'c_index': final_train_cindex,
         'train_c_index': final_train_cindex,
         'best_epoch': best_epoch,
         'history': history
