@@ -324,6 +324,8 @@ def main():
             return obj.tolist()
         elif isinstance(obj, (np.integer, np.floating)):
             return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
         elif isinstance(obj, dict):
             return {k: convert_to_native(v) for k, v in obj.items()}
         elif isinstance(obj, list):
