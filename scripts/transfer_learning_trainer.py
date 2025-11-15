@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from typing import Dict, Tuple
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
