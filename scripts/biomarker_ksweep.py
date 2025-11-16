@@ -485,8 +485,6 @@ def run_ksweep(
         table_data.append(row)
     
     summary_df = pd.DataFrame(table_data)
-        for r in results
-    ])
     
     print(summary_df.to_string(index=False))
     
@@ -527,109 +525,6 @@ def run_ksweep(
             f.write('\n'.join(sorted(r['bidirectional_genes'])))
     
     print(f"✓ Gene lists saved in: gene_lists/")
-    
-    # ========================================
-    # Generate visualization
-    # ========================================
-    
-    print(f"\n{'='*80}")
-    print("GENERATING VISUALIZATIONS")
-    print(f"{'='*80}\n")
-    
-    # Determine figure layout based on whether Cox genes are available
-    if cox_genes:
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        axes = axes.flatten()
-    else:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        axes = axes.flatten()
-    
-    k_vals = [r['k'] for r in results]
-    
-    # Plot 1: Number of consensus genes
-    ax1 = axes[0]
-    ax1.plot(k_vals, [r['n_tcga_consensus'] for r in results], 
-             'o-', label='TCGA consensus', linewidth=2, markersize=8)
-    ax1.plot(k_vals, [r['n_orien_consensus'] for r in results], 
-             's-', label='ORIEN consensus', linewidth=2, markersize=8)
-    ax1.plot(k_vals, [r['n_bidirectional'] for r in results], 
-             '^-', label='Bidirectional', linewidth=2, markersize=8)
-    ax1.axhline(y=20, color='gray', linestyle='--', alpha=0.5, label='Chapter 2 (n=20)')
-    ax1.axhline(y=28, color='gray', linestyle=':', alpha=0.5, label='Chapter 3 (n=28)')
-    ax1.set_xlabel('Top k genes extracted', fontsize=11)
-    ax1.set_ylabel('Number of consensus genes', fontsize=11)
-    ax1.set_title('Consensus Gene Count vs k', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Overlap percentage
-    ax2 = axes[1]
-    ax2.plot(k_vals, [r['overlap_pct'] for r in results], 
-             'o-', color='#2E86AB', linewidth=2, markersize=8, label='Bidirectional')
-    ax2.axhline(y=30, color='gray', linestyle=':', alpha=0.5, label='Chapter 3 (30%)')
-    ax2.set_xlabel('Top k genes extracted', fontsize=11)
-    ax2.set_ylabel('Bidirectional overlap (%)', fontsize=11)
-    ax2.set_title('Stability: Bidirectional Overlap vs k', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-    
-    # Plot 3: Jaccard index
-    ax3 = axes[2]
-    ax3.plot(k_vals, [r['jaccard_index'] for r in results], 
-             'o-', color='#A23B72', linewidth=2, markersize=8)
-    ax3.set_xlabel('Top k genes extracted', fontsize=11)
-    ax3.set_ylabel('Jaccard index', fontsize=11)
-    ax3.set_title('Set Similarity: Jaccard Index vs k', fontsize=12, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    
-    # Plot 4: Summary metrics
-    ax4 = axes[3]
-    x = np.arange(len(k_vals))
-    width = 0.25
-    
-    ax4.bar(x - width, [r['n_tcga_consensus'] for r in results], 
-            width, label='TCGA', alpha=0.8)
-    ax4.bar(x, [r['n_orien_consensus'] for r in results], 
-            width, label='ORIEN', alpha=0.8)
-    ax4.bar(x + width, [r['n_bidirectional'] for r in results], 
-            width, label='Bidirectional', alpha=0.8)
-    
-    ax4.set_xlabel('k value', fontsize=11)
-    ax4.set_ylabel('Number of consensus genes', fontsize=11)
-    ax4.set_title('Consensus Genes by Direction', fontsize=12, fontweight='bold')
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(k_vals, rotation=45)
-    ax4.legend(fontsize=9)
-    ax4.grid(True, alpha=0.3, axis='y')
-    
-    # Plot 5 & 6: Cox overlap (if available)
-    if cox_genes:
-        # Plot 5: Cox overlap count
-        ax5 = axes[4]
-        ax5.plot(k_vals, [r['cox_overlap_bidir'] for r in results], 
-                 'o-', color='#F18F01', linewidth=2, markersize=8, label='Overlap with Cox')
-        ax5.axhline(y=len(cox_genes), color='gray', linestyle='--', alpha=0.5, 
-                   label=f'Chapter 2 total (n={len(cox_genes)})')
-        ax5.set_xlabel('Top k genes extracted', fontsize=11)
-        ax5.set_ylabel('Number of shared genes', fontsize=11)
-        ax5.set_title('Chapter 2 Overlap: Count vs k', fontsize=12, fontweight='bold')
-        ax5.legend(fontsize=9)
-        ax5.grid(True, alpha=0.3)
-        
-        # Plot 6: Cox overlap percentage
-        ax6 = axes[5]
-        ax6.plot(k_vals, [r['cox_overlap_pct_bidir'] for r in results], 
-                 'o-', color='#C73E1D', linewidth=2, markersize=8, label='% of bidirectional')
-        ax6.set_xlabel('Top k genes extracted', fontsize=11)
-        ax6.set_ylabel('Cox overlap (%)', fontsize=11)
-        ax6.set_title('Chapter 2 Overlap: Percentage vs k', fontsize=12, fontweight='bold')
-        ax6.legend(fontsize=9)
-        ax6.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path / 'ksweep_analysis.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Visualization: ksweep_analysis.png")
-    print(f"  {'(6 panels with Cox comparison)' if cox_genes else '(4 panels)'}")
     
     # ========================================
     # Print recommendations
