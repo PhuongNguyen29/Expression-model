@@ -38,7 +38,7 @@ model:
   dropout: 0.3
   activation: "relu"
   batch_norm: true
-  weight_init: "kaiming_uniform"
+  weight_init: "xavier_normal"
 
 # Training configuration
 training:
