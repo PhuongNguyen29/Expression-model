@@ -51,7 +51,7 @@ sys.path.insert(0, str(project_root))
 
 from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.data.dataset import SurvivalDataset
-from src.utils.batch_samplers import StratifiedSampler
+from src.utils.batch_samplers import StratifiedBatchSampler
 
 
 # ============================================================================
@@ -67,47 +67,68 @@ def load_consensus_genes(filepath: Path) -> List[str]:
 
 def load_data(
     cohort: str,
-    genes: List[str],
-    data_dir: str = 'data/processed'
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    genes: List[str]
+) -> Dict:
     """
     Load and filter data to only include consensus genes.
+    
+    Follows same structure as transfer_learning_trainer.py:
+    1. Load batch-corrected raw data
+    2. Filter to consensus genes only
+    3. Load harmonized survival data
     
     Args:
         cohort: 'tcga' or 'orien'
         genes: List of gene names to keep
-        data_dir: Directory containing processed data
         
     Returns:
-        (gene_data, survival_data)
+        Dict with 'expression' and 'survival' DataFrames
     """
-    data_path = Path(data_dir)
+    # Load batch-corrected expression data (same as Chapter 3)
+    if cohort.lower() == 'tcga':
+        expr_file = "data/raw/tcga_batch_corrected_2sv.csv"
+        surv_file = "data/processed/surv_tcga_harmonized.csv"
+    else:  # orien
+        expr_file = "data/raw/orien_batch_corrected.csv"
+        surv_file = "data/processed/surv_orien_harmonized.csv"
     
-    # Load gene expression
-    gene_file = data_path / f'{cohort}_preprocessed.csv'
-    gene_data = pd.read_csv(gene_file, index_col=0)
+    # Load expression data
+    expression = pd.read_csv(expr_file, index_col=0)
     
     # Filter to consensus genes only
-    available_genes = [g for g in genes if g in gene_data.columns]
-    gene_data = gene_data[available_genes]
+    available_genes = [g for g in genes if g in expression.index]
+    expression = expression.loc[available_genes]
+    
+    # Transpose to get (samples × genes) format expected by SurvivalDataset
+    expression = expression.T
     
     # Load survival data
-    surv_file = data_path / f'surv_{cohort}_harmonized.csv'
-    survival_data = pd.read_csv(surv_file, index_col=0)
+    survival = pd.read_csv(surv_file)
+    if 'sampleID' in survival.columns:
+        survival = survival.set_index('sampleID')
     
     # Align samples
-    common_samples = gene_data.index.intersection(survival_data.index)
-    gene_data = gene_data.loc[common_samples]
-    survival_data = survival_data.loc[common_samples]
+    common_samples = list(set(expression.index) & set(survival.index))
+    common_samples = sorted(common_samples)
     
-    return gene_data, survival_data
+    expression = expression.loc[common_samples]
+    survival = survival.loc[common_samples]
+    
+    return {
+        'expression': expression,
+        'survival': survival
+    }
 
 
 def create_model(n_features: int, device: str) -> ElasticDeepSurv:
-    """Create ElasticDeepSurv model with standard hyperparameters."""
+    """
+    Create ElasticDeepSurv model with standard hyperparameters.
+    
+    Uses same hyperparameters as Chapter 3/4 transfer learning.
+    """
     model = ElasticDeepSurv(
         n_features=n_features,
-        hidden_sizes=[128, 64],  # Standard architecture
+        hidden_sizes=[128, 64],  # Standard architecture from Chapter 3
         dropout=0.3,
         l1_ratio=0.7,
         alpha=0.01
@@ -276,14 +297,14 @@ def transfer_learning_pipeline(
     if verbose:
         print(f"    Loading data...")
     
-    source_gene, source_surv = load_data(source_cohort, genes)
-    target_gene, target_surv = load_data(target_cohort, genes)
+    source_data = load_data(source_cohort, genes)
+    target_data = load_data(target_cohort, genes)
     
-    n_genes = len(source_gene.columns)
+    n_genes = len(genes)
     
     if verbose:
-        print(f"    Source ({source_cohort}): {len(source_gene)} samples, {n_genes} genes")
-        print(f"    Target ({target_cohort}): {len(target_gene)} samples, {n_genes} genes")
+        print(f"    Source ({source_cohort}): {len(source_data['expression'])} samples, {source_data['expression'].shape[1]} genes")
+        print(f"    Target ({target_cohort}): {len(target_data['expression'])} samples, {target_data['expression'].shape[1]} genes")
     
     # ========================================
     # Create datasets
@@ -293,35 +314,46 @@ def transfer_learning_pipeline(
     from sklearn.model_selection import train_test_split
     
     target_train_idx, target_val_idx = train_test_split(
-        range(len(target_gene)),
+        range(len(target_data['expression'])),
         test_size=0.2,
         random_state=seed,
-        stratify=target_surv['event'].values
+        stratify=target_data['survival']['event'].values
     )
     
-    target_train_gene = target_gene.iloc[target_train_idx]
-    target_train_surv = target_surv.iloc[target_train_idx]
-    target_val_gene = target_gene.iloc[target_val_idx]
-    target_val_surv = target_surv.iloc[target_val_idx]
+    target_train_expr = target_data['expression'].iloc[target_train_idx]
+    target_train_surv = target_data['survival'].iloc[target_train_idx]
+    target_val_expr = target_data['expression'].iloc[target_val_idx]
+    target_val_surv = target_data['survival'].iloc[target_val_idx]
     
     # Create datasets
-    source_dataset = SurvivalDataset(source_gene.values, source_surv.values)
-    target_train_dataset = SurvivalDataset(target_train_gene.values, target_train_surv.values)
-    target_val_dataset = SurvivalDataset(target_val_gene.values, target_val_surv.values)
+    source_dataset = SurvivalDataset(
+        source_data['expression'],
+        source_data['survival']
+    )
+    target_train_dataset = SurvivalDataset(target_train_expr, target_train_surv)
+    target_val_dataset = SurvivalDataset(target_val_expr, target_val_surv)
     
     # Create data loaders
+    source_sampler = StratifiedBatchSampler(
+        events=source_dataset.y_event,
+        batch_size=32,
+        shuffle=True
+    )
+    
     source_loader = DataLoader(
         source_dataset,
+        batch_sampler=source_sampler
+    )
+    
+    target_train_sampler = StratifiedBatchSampler(
+        events=target_train_dataset.y_event,
         batch_size=32,
-        sampler=StratifiedSampler(source_surv['event'].values, batch_size=32),
-        drop_last=False
+        shuffle=True
     )
     
     target_train_loader = DataLoader(
         target_train_dataset,
-        batch_size=32,
-        sampler=StratifiedSampler(target_train_surv['event'].values, batch_size=32),
-        drop_last=False
+        batch_sampler=target_train_sampler
     )
     
     target_val_loader = DataLoader(target_val_dataset, batch_size=32, shuffle=False)
@@ -374,7 +406,7 @@ def transfer_learning_pipeline(
     # Evaluate on full target cohort
     # ========================================
     
-    target_full_dataset = SurvivalDataset(target_gene.values, target_surv.values)
+    target_full_dataset = SurvivalDataset(target_data['expression'], target_data['survival'])
     target_full_loader = DataLoader(target_full_dataset, batch_size=32, shuffle=False)
     
     final_cindex = evaluate_cindex(model, target_full_loader, device)
