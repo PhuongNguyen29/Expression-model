@@ -163,18 +163,26 @@ def train_model(
         train_losses = []
         
         for batch_idx, batch in enumerate(train_loader):
-            # Batch is a tuple: (x, y) where y is a dict/array with time and event
-            x = batch[0].to(device)
-            y = batch[1]  # This is the survival data
+            # Batch is a dictionary with 'x' and 'y' keys
+            if isinstance(batch, dict):
+                x = batch['x'].to(device)
+                y = batch['y']
+            else:
+                # Fallback: batch is a tuple/list
+                x = batch[0].to(device)
+                y = batch[1]
             
             # Extract time and event from y
             if isinstance(y, dict):
                 time = y['time'].to(device)
                 event = y['event'].to(device)
-            else:
-                # y is a 2D array/tensor: [:, 0] is time, [:, 1] is event
+            elif isinstance(y, torch.Tensor):
                 time = y[:, 0].to(device)
                 event = y[:, 1].to(device)
+            else:
+                # numpy array
+                time = torch.tensor(y[:, 0], device=device)
+                event = torch.tensor(y[:, 1], device=device)
             
             optimizer.zero_grad()
             risk = model(x)
@@ -236,17 +244,25 @@ def evaluate_cindex(
     
     with torch.no_grad():
         for batch in data_loader:
-            x = batch[0].to(device)
-            y = batch[1]
+            # Handle dictionary or tuple/list batch format
+            if isinstance(batch, dict):
+                x = batch['x'].to(device)
+                y = batch['y']
+            else:
+                x = batch[0].to(device)
+                y = batch[1]
             
             # Extract time and event from y
             if isinstance(y, dict):
                 time = y['time'].cpu().numpy()
                 event = y['event'].cpu().numpy()
+            elif isinstance(y, torch.Tensor):
+                time = y[:, 0].cpu().numpy()
+                event = y[:, 1].cpu().numpy()
             else:
-                # y is a 2D array/tensor
-                time = y[:, 0].cpu().numpy() if isinstance(y, torch.Tensor) else y[:, 0]
-                event = y[:, 1].cpu().numpy() if isinstance(y, torch.Tensor) else y[:, 1]
+                # numpy array
+                time = y[:, 0]
+                event = y[:, 1]
             
             risk = model(x)
             
