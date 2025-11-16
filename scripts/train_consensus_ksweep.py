@@ -73,16 +73,17 @@ def load_data(
     Load and filter data to only include consensus genes.
     
     Follows same structure as transfer_learning_trainer.py:
-    1. Load batch-corrected raw data
+    1. Load batch-corrected raw data (genes × samples)
     2. Filter to consensus genes only
     3. Load harmonized survival data
+    4. Return expression in (genes × samples) format - SurvivalDataset handles it
     
     Args:
         cohort: 'tcga' or 'orien'
         genes: List of gene names to keep
         
     Returns:
-        Dict with 'expression' and 'survival' DataFrames
+        Dict with 'expression' (genes × samples) and 'survival' DataFrames
     """
     # Load batch-corrected expression data (same as Chapter 3)
     if cohort.lower() == 'tcga':
@@ -92,30 +93,27 @@ def load_data(
         expr_file = "data/raw/orien_batch_corrected.csv"
         surv_file = "data/processed/surv_orien_harmonized.csv"
     
-    # Load expression data
+    # Load expression data (genes × samples)
     expression = pd.read_csv(expr_file, index_col=0)
     
     # Filter to consensus genes only
     available_genes = [g for g in genes if g in expression.index]
     expression = expression.loc[available_genes]
     
-    # Transpose to get (samples × genes) format expected by SurvivalDataset
-    expression = expression.T
-    
     # Load survival data
     survival = pd.read_csv(surv_file)
     if 'sampleID' in survival.columns:
         survival = survival.set_index('sampleID')
     
-    # Align samples
-    common_samples = list(set(expression.index) & set(survival.index))
+    # Align samples (only keep samples present in both expression and survival)
+    common_samples = list(set(expression.columns) & set(survival.index))
     common_samples = sorted(common_samples)
     
-    expression = expression.loc[common_samples]
+    expression = expression[common_samples]
     survival = survival.loc[common_samples]
     
     return {
-        'expression': expression,
+        'expression': expression,  # genes × samples format
         'survival': survival
     }
 
@@ -300,32 +298,36 @@ def transfer_learning_pipeline(
     source_data = load_data(source_cohort, genes)
     target_data = load_data(target_cohort, genes)
     
-    n_genes = len(genes)
+    n_genes = len(source_data['expression'])  # Number of rows (genes)
+    n_source_samples = len(source_data['expression'].columns)  # Number of columns (samples)
+    n_target_samples = len(target_data['expression'].columns)
     
     if verbose:
-        print(f"    Source ({source_cohort}): {len(source_data['expression'])} samples, {source_data['expression'].shape[1]} genes")
-        print(f"    Target ({target_cohort}): {len(target_data['expression'])} samples, {target_data['expression'].shape[1]} genes")
+        print(f"    Source ({source_cohort}): {n_source_samples} samples, {n_genes} genes")
+        print(f"    Target ({target_cohort}): {n_target_samples} samples, {n_genes} genes")
     
     # ========================================
     # Create datasets
     # ========================================
     
-    # Split target into train/val (80/20)
+    # Split target into train/val (80/20) based on sample IDs
     from sklearn.model_selection import train_test_split
     
-    target_train_idx, target_val_idx = train_test_split(
-        range(len(target_data['expression'])),
+    sample_ids = list(target_data['expression'].columns)
+    train_sample_ids, val_sample_ids = train_test_split(
+        sample_ids,
         test_size=0.2,
         random_state=seed,
         stratify=target_data['survival']['event'].values
     )
     
-    target_train_expr = target_data['expression'].iloc[target_train_idx]
-    target_train_surv = target_data['survival'].iloc[target_train_idx]
-    target_val_expr = target_data['expression'].iloc[target_val_idx]
-    target_val_surv = target_data['survival'].iloc[target_val_idx]
+    # Create train/val splits
+    target_train_expr = target_data['expression'][train_sample_ids]
+    target_train_surv = target_data['survival'].loc[train_sample_ids]
+    target_val_expr = target_data['expression'][val_sample_ids]
+    target_val_surv = target_data['survival'].loc[val_sample_ids]
     
-    # Create datasets
+    # Create datasets (SurvivalDataset expects genes × samples format)
     source_dataset = SurvivalDataset(
         source_data['expression'],
         source_data['survival']
