@@ -210,9 +210,9 @@ class ElasticDeepSurvTrainer:
                 continue
             
             # Adaptive thresholds based on parameter count
-            warn_threshold = 1.5 * expected_norm  # 2× expected
-            clip_threshold = 2.0 * expected_norm  # 3× expected
-            explode_threshold = 3.0 * expected_norm  # 5× expected
+            warn_threshold = 2.0 * expected_norm  # 2× expected
+            clip_threshold = 3.0 * expected_norm  # 3× expected
+            explode_threshold = 5.0 * expected_norm  # 5× expected
             
             # Handle gradient magnitude
             if total_norm > explode_threshold:
