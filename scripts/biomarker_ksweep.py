@@ -61,6 +61,22 @@ def load_consensus_genes(filepath: str = 'data/raw/consensus_genes_308.txt') -> 
     return genes
 
 
+def load_cox_genes(filepath: str = 'data/raw/cox_consensus_genes_20.txt') -> List[str]:
+    """
+    Load Chapter 2 Cox regression consensus genes (20 genes).
+    
+    Returns empty list if file not found (Cox comparison will be skipped).
+    """
+    try:
+        with open(filepath, 'r') as f:
+            genes = [line.strip() for line in f if line.strip()]
+        return genes
+    except FileNotFoundError:
+        print(f"  ⚠️  Cox genes file not found: {filepath}")
+        print(f"      Chapter 2 comparison will be skipped")
+        return []
+
+
 def compute_gene_importance(model: ElasticDeepSurv) -> np.ndarray:
     """
     Compute gene importance using L2 norm of first layer weights.
@@ -260,6 +276,7 @@ def analyze_k_value(
     k: int,
     tcga_genes: List[List[str]],
     orien_genes: List[List[str]],
+    cox_genes: List[str] = None,
     min_appearances: int = 3
 ) -> Dict:
     """
@@ -269,10 +286,11 @@ def analyze_k_value(
         k: The k value being analyzed
         tcga_genes: List of top-k gene lists from TCGA transfer models
         orien_genes: List of top-k gene lists from ORIEN transfer models
+        cox_genes: Chapter 2 Cox regression genes for comparison (optional)
         min_appearances: Minimum appearances for consensus (default: 3/5 seeds)
         
     Returns:
-        Dictionary with analysis results
+        Dictionary with analysis results including Cox overlap
     """
     # Compute consensus for each direction
     tcga_consensus = compute_consensus_genes(tcga_genes, min_appearances)
@@ -293,6 +311,33 @@ def analyze_k_value(
     union = set(tcga_consensus) | set(orien_consensus)
     jaccard = len(bidirectional) / len(union) if len(union) > 0 else 0.0
     
+    # Chapter 2 Cox genes overlap (if provided)
+    cox_overlap_bidir = 0
+    cox_overlap_tcga = 0
+    cox_overlap_orien = 0
+    cox_overlap_pct_bidir = 0.0
+    cox_overlap_pct_tcga = 0.0
+    cox_overlap_pct_orien = 0.0
+    shared_with_cox = []
+    
+    if cox_genes:
+        cox_set = set(cox_genes)
+        
+        # Bidirectional vs Cox
+        shared_with_cox = list(bidirectional & cox_set)
+        cox_overlap_bidir = len(shared_with_cox)
+        cox_overlap_pct_bidir = (cox_overlap_bidir / len(bidirectional) * 100) if len(bidirectional) > 0 else 0.0
+        
+        # TCGA consensus vs Cox
+        tcga_cox_shared = set(tcga_consensus) & cox_set
+        cox_overlap_tcga = len(tcga_cox_shared)
+        cox_overlap_pct_tcga = (cox_overlap_tcga / len(tcga_consensus) * 100) if len(tcga_consensus) > 0 else 0.0
+        
+        # ORIEN consensus vs Cox
+        orien_cox_shared = set(orien_consensus) & cox_set
+        cox_overlap_orien = len(orien_cox_shared)
+        cox_overlap_pct_orien = (cox_overlap_orien / len(orien_consensus) * 100) if len(orien_consensus) > 0 else 0.0
+    
     return {
         'k': k,
         'n_tcga_consensus': len(tcga_consensus),
@@ -302,7 +347,15 @@ def analyze_k_value(
         'jaccard_index': jaccard,
         'tcga_consensus_genes': tcga_consensus,
         'orien_consensus_genes': orien_consensus,
-        'bidirectional_genes': list(bidirectional)
+        'bidirectional_genes': list(bidirectional),
+        # Cox overlap metrics
+        'cox_overlap_bidir': cox_overlap_bidir,
+        'cox_overlap_pct_bidir': cox_overlap_pct_bidir,
+        'cox_overlap_tcga': cox_overlap_tcga,
+        'cox_overlap_pct_tcga': cox_overlap_pct_tcga,
+        'cox_overlap_orien': cox_overlap_orien,
+        'cox_overlap_pct_orien': cox_overlap_pct_orien,
+        'shared_genes_with_cox': shared_with_cox
     }
 
 
@@ -344,6 +397,14 @@ def run_ksweep(
     gene_names = load_consensus_genes()
     print(f"✓ Loaded {len(gene_names)} genes\n")
     
+    # Load Chapter 2 Cox genes for comparison
+    print("Loading Chapter 2 Cox genes...")
+    cox_genes = load_cox_genes()
+    if cox_genes:
+        print(f"✓ Loaded {len(cox_genes)} Cox genes for comparison\n")
+    else:
+        print(f"  (Chapter 2 comparison will be skipped)\n")
+    
     print(f"Configuration:")
     print(f"  Models directory: {models_dir}")
     print(f"  K values: {k_values}")
@@ -377,6 +438,7 @@ def run_ksweep(
             k=k,
             tcga_genes=tcga_genes,
             orien_genes=orien_genes,
+            cox_genes=cox_genes if cox_genes else None,
             min_appearances=min_appearances
         )
         
@@ -389,6 +451,11 @@ def run_ksweep(
         print(f"    Bidirectional: {analysis['n_bidirectional']} genes")
         print(f"    Overlap: {analysis['overlap_pct']:.1f}%")
         print(f"    Jaccard index: {analysis['jaccard_index']:.3f}")
+        
+        # Print Cox overlap if available
+        if cox_genes and analysis['cox_overlap_bidir'] > 0:
+            print(f"    Cox overlap: {analysis['cox_overlap_bidir']}/{len(cox_genes)} ({analysis['cox_overlap_pct_bidir']:.1f}%)")
+            print(f"    Shared genes: {', '.join(analysis['shared_genes_with_cox'][:5])}{' ...' if len(analysis['shared_genes_with_cox']) > 5 else ''}")
     
     # ========================================
     # Create summary table
@@ -398,8 +465,10 @@ def run_ksweep(
     print("GENERATING SUMMARY TABLE")
     print(f"{'='*80}\n")
     
-    summary_df = pd.DataFrame([
-        {
+    # Build summary table with optional Cox columns
+    table_data = []
+    for r in results:
+        row = {
             'k': r['k'],
             'TCGA_consensus': r['n_tcga_consensus'],
             'ORIEN_consensus': r['n_orien_consensus'],
@@ -407,6 +476,15 @@ def run_ksweep(
             'Overlap_%': f"{r['overlap_pct']:.1f}",
             'Jaccard': f"{r['jaccard_index']:.3f}"
         }
+        
+        # Add Cox overlap if available
+        if cox_genes:
+            row['Cox_overlap'] = r['cox_overlap_bidir']
+            row['Cox_overlap_%'] = f"{r['cox_overlap_pct_bidir']:.1f}"
+        
+        table_data.append(row)
+    
+    summary_df = pd.DataFrame(table_data)
         for r in results
     ])
     
@@ -458,12 +536,18 @@ def run_ksweep(
     print("GENERATING VISUALIZATIONS")
     print(f"{'='*80}\n")
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Determine figure layout based on whether Cox genes are available
+    if cox_genes:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        axes = axes.flatten()
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        axes = axes.flatten()
     
     k_vals = [r['k'] for r in results]
     
     # Plot 1: Number of consensus genes
-    ax1 = axes[0, 0]
+    ax1 = axes[0]
     ax1.plot(k_vals, [r['n_tcga_consensus'] for r in results], 
              'o-', label='TCGA consensus', linewidth=2, markersize=8)
     ax1.plot(k_vals, [r['n_orien_consensus'] for r in results], 
@@ -479,9 +563,9 @@ def run_ksweep(
     ax1.grid(True, alpha=0.3)
     
     # Plot 2: Overlap percentage
-    ax2 = axes[0, 1]
+    ax2 = axes[1]
     ax2.plot(k_vals, [r['overlap_pct'] for r in results], 
-             'o-', color='#2E86AB', linewidth=2, markersize=8)
+             'o-', color='#2E86AB', linewidth=2, markersize=8, label='Bidirectional')
     ax2.axhline(y=30, color='gray', linestyle=':', alpha=0.5, label='Chapter 3 (30%)')
     ax2.set_xlabel('Top k genes extracted', fontsize=11)
     ax2.set_ylabel('Bidirectional overlap (%)', fontsize=11)
@@ -490,7 +574,7 @@ def run_ksweep(
     ax2.grid(True, alpha=0.3)
     
     # Plot 3: Jaccard index
-    ax3 = axes[1, 0]
+    ax3 = axes[2]
     ax3.plot(k_vals, [r['jaccard_index'] for r in results], 
              'o-', color='#A23B72', linewidth=2, markersize=8)
     ax3.set_xlabel('Top k genes extracted', fontsize=11)
@@ -499,7 +583,7 @@ def run_ksweep(
     ax3.grid(True, alpha=0.3)
     
     # Plot 4: Summary metrics
-    ax4 = axes[1, 1]
+    ax4 = axes[3]
     x = np.arange(len(k_vals))
     width = 0.25
     
@@ -518,9 +602,34 @@ def run_ksweep(
     ax4.legend(fontsize=9)
     ax4.grid(True, alpha=0.3, axis='y')
     
+    # Plot 5 & 6: Cox overlap (if available)
+    if cox_genes:
+        # Plot 5: Cox overlap count
+        ax5 = axes[4]
+        ax5.plot(k_vals, [r['cox_overlap_bidir'] for r in results], 
+                 'o-', color='#F18F01', linewidth=2, markersize=8, label='Overlap with Cox')
+        ax5.axhline(y=len(cox_genes), color='gray', linestyle='--', alpha=0.5, 
+                   label=f'Chapter 2 total (n={len(cox_genes)})')
+        ax5.set_xlabel('Top k genes extracted', fontsize=11)
+        ax5.set_ylabel('Number of shared genes', fontsize=11)
+        ax5.set_title('Chapter 2 Overlap: Count vs k', fontsize=12, fontweight='bold')
+        ax5.legend(fontsize=9)
+        ax5.grid(True, alpha=0.3)
+        
+        # Plot 6: Cox overlap percentage
+        ax6 = axes[5]
+        ax6.plot(k_vals, [r['cox_overlap_pct_bidir'] for r in results], 
+                 'o-', color='#C73E1D', linewidth=2, markersize=8, label='% of bidirectional')
+        ax6.set_xlabel('Top k genes extracted', fontsize=11)
+        ax6.set_ylabel('Cox overlap (%)', fontsize=11)
+        ax6.set_title('Chapter 2 Overlap: Percentage vs k', fontsize=12, fontweight='bold')
+        ax6.legend(fontsize=9)
+        ax6.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig(output_path / 'ksweep_analysis.png', dpi=300, bbox_inches='tight')
     print(f"✓ Visualization: ksweep_analysis.png")
+    print(f"  {'(6 panels with Cox comparison)' if cox_genes else '(4 panels)'}")
     
     # ========================================
     # Print recommendations
