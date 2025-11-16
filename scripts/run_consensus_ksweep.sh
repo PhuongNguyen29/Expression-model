@@ -46,7 +46,7 @@ echo "Starting evaluation..."
 echo ""
 
 # Run wrapper
-python scripts/consensus_ksweep_wrapper.py \
+python scripts/train_consensus_ksweep.py \
     --k_values ${K_VALUES} \
     --gene_lists_dir ${GENE_LISTS_DIR} \
     --output_dir ${OUTPUT_DIR} \

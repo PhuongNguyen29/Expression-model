@@ -1,31 +1,21 @@
 #!/usr/bin/env python3
 """
-Script: train_consensus_ksweep.py
-Purpose: Train and evaluate transfer learning with consensus genes from k-sweep
-Status: ACTIVE (Chapter 4 - Performance-based k selection)
+Script: consensus_ksweep_wrapper.py
+Purpose: Wrapper to evaluate consensus genes using existing transfer_learning_trainer.py
+Status: ACTIVE (Chapter 4 - Consensus k-sweep evaluation)
 Author: Phuong
 Created: 2024-11-15
 
-This script:
-1. Loops through selected k values from k-sweep results
-2. Loads bidirectional consensus genes for each k
-3. Trains transfer learning models using ONLY those genes
-4. Evaluates cross-cohort performance (C-index)
-5. Generates comparison table to select optimal k
-6. Recommends k value that maximizes C-index
+This wrapper:
+1. Loops through k values from k-sweep results
+2. For each k, creates temporary gene list file with consensus genes
+3. Calls your existing transfer_learning_trainer.py (which already works!)
+4. Collects results and generates comparison table
 
-Methodology:
-- Uses same training protocol as full 308-gene models
-- Bidirectional validation (TCGA→ORIEN, ORIEN→TCGA)
-- Single seed (42) for consistency with k-sweep
-- Final selection based on C-index, not just stability
-
-Reference:
-- Guyon & Elisseeff (2003): Feature selection validated by model performance
-- Your Chapter 3: Same k-sweep → retrain → evaluate methodology
+Strategy: Leverage existing working code instead of reimplementing from scratch
 
 Usage:
-    python scripts/train_consensus_ksweep.py \
+    python scripts/consensus_ksweep_wrapper.py \
         --k_values 90 95 100 120 140 150 \
         --gene_lists_dir results/biomarker_ksweep_transfer/gene_lists \
         --output_dir results/consensus_ksweep_evaluation \
@@ -35,28 +25,19 @@ Usage:
 import os
 import sys
 import json
+import shutil
 import argparse
+import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple
-import numpy as np
+from typing import List, Dict
 import pandas as pd
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
+import numpy as np
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.models.elastic_deepsurv import ElasticDeepSurv
-from src.data.dataset import SurvivalDataset
-from src.utils.batch_samplers import StratifiedBatchSampler
-
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
 
 def load_consensus_genes(filepath: Path) -> List[str]:
     """Load consensus genes from text file."""
@@ -65,466 +46,321 @@ def load_consensus_genes(filepath: Path) -> List[str]:
     return genes
 
 
-def load_data(
-    cohort: str,
-    genes: List[str]
-) -> Dict:
+def create_temp_gene_file(genes: List[str], output_path: Path) -> Path:
     """
-    Load and filter data to only include consensus genes.
-    
-    Follows same structure as transfer_learning_trainer.py:
-    1. Load batch-corrected raw data (genes × samples)
-    2. Filter to consensus genes only
-    3. Load harmonized survival data
-    4. Return expression in (genes × samples) format - SurvivalDataset handles it
+    Create temporary gene list file for transfer_learning_trainer.py
     
     Args:
-        cohort: 'tcga' or 'orien'
-        genes: List of gene names to keep
+        genes: List of gene names
+        output_path: Where to save the temporary file
         
     Returns:
-        Dict with 'expression' (genes × samples) and 'survival' DataFrames
+        Path to created file
     """
-    # Load batch-corrected expression data (same as Chapter 3)
-    if cohort.lower() == 'tcga':
-        expr_file = "data/raw/tcga_batch_corrected_2sv.csv"
-        surv_file = "data/processed/surv_tcga_harmonized.csv"
-    else:  # orien
-        expr_file = "data/raw/orien_batch_corrected.csv"
-        surv_file = "data/processed/surv_orien_harmonized.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Load expression data (genes × samples)
-    expression = pd.read_csv(expr_file, index_col=0)
+    with open(output_path, 'w') as f:
+        f.write('\n'.join(genes))
     
-    # Filter to consensus genes only
-    available_genes = [g for g in genes if g in expression.index]
-    expression = expression.loc[available_genes]
-    
-    # Load survival data
-    survival = pd.read_csv(surv_file)
-    if 'sampleID' in survival.columns:
-        survival = survival.set_index('sampleID')
-    
-    # Align samples (only keep samples present in both expression and survival)
-    common_samples = list(set(expression.columns) & set(survival.index))
-    common_samples = sorted(common_samples)
-    
-    expression = expression[common_samples]
-    survival = survival.loc[common_samples]
-    
-    return {
-        'expression': expression,  # genes × samples format
-        'survival': survival
-    }
+    return output_path
 
 
-def create_model(n_features: int, device: str) -> ElasticDeepSurv:
-    """
-    Create ElasticDeepSurv model with standard hyperparameters.
-    
-    Uses same hyperparameters as Chapter 3/4 transfer learning.
-    """
-    model = ElasticDeepSurv(
-        n_features=n_features,
-        hidden_sizes=[128, 64],  # Standard architecture from Chapter 3
-        dropout=0.3,
-        l1_ratio=0.7,
-        alpha=0.01
-    )
-    return model.to(device)
-
-
-def train_model(
-    model: ElasticDeepSurv,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    device: str,
-    epochs: int = 100,
-    lr: float = 0.001,
-    patience: int = 20,
-    verbose: bool = True
-) -> Dict:
-    """
-    Train model with early stopping.
-    
-    Returns:
-        Dictionary with training history and best metrics
-    """
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0001)
-    
-    best_val_cindex = 0.0
-    best_epoch = 0
-    patience_counter = 0
-    history = {'train_loss': [], 'val_cindex': []}
-    
-    for epoch in range(epochs):
-        # Training
-        model.train()
-        train_losses = []
-        
-        for batch_idx, batch in enumerate(train_loader):
-            # Batch is a dictionary with 'x' and 'y' keys
-            if isinstance(batch, dict):
-                x = batch['x'].to(device)
-                y = batch['y']
-            else:
-                # Fallback: batch is a tuple/list
-                x = batch[0].to(device)
-                y = batch[1]
-            
-            # Extract time and event from y
-            if isinstance(y, dict):
-                time = y['time'].to(device)
-                event = y['event'].to(device)
-            elif isinstance(y, torch.Tensor):
-                time = y[:, 0].to(device)
-                event = y[:, 1].to(device)
-            else:
-                # numpy array
-                time = torch.tensor(y[:, 0], device=device)
-                event = torch.tensor(y[:, 1], device=device)
-            
-            optimizer.zero_grad()
-            risk = model(x)
-            loss = model.loss(risk, time, event)
-            loss.backward()
-            optimizer.step()
-            
-            train_losses.append(loss.item())
-        
-        avg_train_loss = np.mean(train_losses)
-        
-        # Validation
-        model.eval()
-        val_cindex = evaluate_cindex(model, val_loader, device)
-        
-        history['train_loss'].append(avg_train_loss)
-        history['val_cindex'].append(val_cindex)
-        
-        # Early stopping check
-        if val_cindex > best_val_cindex:
-            best_val_cindex = val_cindex
-            best_epoch = epoch
-            patience_counter = 0
-            best_state = model.state_dict().copy()
-        else:
-            patience_counter += 1
-        
-        if verbose and (epoch + 1) % 10 == 0:
-            print(f"    Epoch {epoch+1:3d}: Loss={avg_train_loss:.4f}, "
-                  f"Val C-index={val_cindex:.4f}, Best={best_val_cindex:.4f}")
-        
-        # Early stopping
-        if patience_counter >= patience:
-            if verbose:
-                print(f"    Early stopping at epoch {epoch+1}")
-            break
-    
-    # Restore best model
-    model.load_state_dict(best_state)
-    
-    return {
-        'best_val_cindex': best_val_cindex,
-        'best_epoch': best_epoch,
-        'history': history
-    }
-
-
-def evaluate_cindex(
-    model: ElasticDeepSurv,
-    data_loader: DataLoader,
-    device: str
-) -> float:
-    """Evaluate concordance index on a dataset."""
-    model.eval()
-    
-    all_risks = []
-    all_times = []
-    all_events = []
-    
-    with torch.no_grad():
-        for batch in data_loader:
-            # Handle dictionary or tuple/list batch format
-            if isinstance(batch, dict):
-                x = batch['x'].to(device)
-                y = batch['y']
-            else:
-                x = batch[0].to(device)
-                y = batch[1]
-            
-            # Extract time and event from y
-            if isinstance(y, dict):
-                time = y['time'].cpu().numpy()
-                event = y['event'].cpu().numpy()
-            elif isinstance(y, torch.Tensor):
-                time = y[:, 0].cpu().numpy()
-                event = y[:, 1].cpu().numpy()
-            else:
-                # numpy array
-                time = y[:, 0]
-                event = y[:, 1]
-            
-            risk = model(x)
-            
-            all_risks.extend(risk.cpu().numpy())
-            all_times.extend(time)
-            all_events.extend(event)
-    
-    # Compute C-index
-    all_risks = np.array(all_risks)
-    all_times = np.array(all_times)
-    all_events = np.array(all_events)
-    
-    # Simple C-index calculation
-    concordant = 0
-    permissible = 0
-    
-    for i in range(len(all_risks)):
-        if all_events[i] == 0:
-            continue
-        
-        for j in range(len(all_risks)):
-            if all_times[j] > all_times[i]:
-                permissible += 1
-                if all_risks[i] > all_risks[j]:
-                    concordant += 1
-    
-    cindex = concordant / permissible if permissible > 0 else 0.5
-    return cindex
-
-
-def transfer_learning_pipeline(
+def run_transfer_learning(
     source_cohort: str,
     target_cohort: str,
-    genes: List[str],
-    seed: int,
-    device: str,
+    gene_file: Path,
     output_dir: Path,
+    seed: int,
+    source_params: str,
+    target_params: str
+) -> Dict:
+    """
+    Run transfer_learning_trainer.py via subprocess.
+    
+    Args:
+        source_cohort: 'tcga' or 'orien'
+        target_cohort: 'orien' or 'tcga'
+        gene_file: Path to consensus gene list
+        output_dir: Output directory for this run
+        seed: Random seed
+        source_params: Path to source hyperparameters JSON
+        target_params: Path to target hyperparameters JSON
+        
+    Returns:
+        Dictionary with results (parsed from output)
+    """
+    # Build command
+    cmd = [
+        'python',
+        'scripts/transfer_learning_trainer.py',
+        '--source_cohort', source_cohort,
+        '--target_cohort', target_cohort,
+        '--source_params', source_params,
+        '--target_params', target_params,
+        '--consensus_gene_file', str(gene_file),
+        '--output_dir', str(output_dir),
+        '--seed', str(seed),
+        '--n_epochs_pretrain', '100',
+        '--n_epochs_finetune', '50',
+        '--lr_pretrain', '0.0001',
+        '--lr_finetune', '0.00001'
+    ]
+    
+    print(f"    Running: {' '.join(cmd)}")
+    
+    # Run subprocess
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(project_root)
+        )
+        
+        # Parse results from output directory
+        results_file = output_dir / 'transfer_results.json'
+        
+        if results_file.exists():
+            with open(results_file, 'r') as f:
+                results = json.load(f)
+            return results
+        else:
+            # Try to extract C-index from stdout
+            print(f"    Warning: No results file found, parsing stdout")
+            return parse_stdout_for_cindex(result.stdout)
+    
+    except subprocess.CalledProcessError as e:
+        print(f"    Error running transfer learning:")
+        print(f"    {e.stderr}")
+        raise
+
+
+def parse_stdout_for_cindex(stdout: str) -> Dict:
+    """
+    Parse C-index from stdout as fallback.
+    
+    Looks for patterns like:
+    "Final C-index: 0.7650"
+    "Fine-tuning C-index: 0.8621"
+    """
+    results = {
+        'pretrain_cindex': None,
+        'finetune_cindex': None,
+        'final_cindex': None
+    }
+    
+    lines = stdout.split('\n')
+    for line in lines:
+        if 'C-index' in line or 'c-index' in line or 'c_index' in line:
+            # Try to extract number
+            import re
+            match = re.search(r'(\d+\.\d+)', line)
+            if match:
+                cindex = float(match.group(1))
+                if 'final' in line.lower():
+                    results['final_cindex'] = cindex
+                elif 'finetune' in line.lower() or 'fine-tun' in line.lower():
+                    results['finetune_cindex'] = cindex
+                elif 'pretrain' in line.lower() or 'pre-train' in line.lower():
+                    results['pretrain_cindex'] = cindex
+    
+    return results
+
+
+def evaluate_k_value(
+    k: int,
+    gene_lists_dir: Path,
+    output_dir: Path,
+    seed: int,
+    source_params: str,
+    target_params: str,
     verbose: bool = True
 ) -> Dict:
     """
-    Complete transfer learning pipeline for one direction.
+    Evaluate one k value by running transfer learning in both directions.
     
     Args:
-        source_cohort: 'tcga' or 'orien' (for pre-training)
-        target_cohort: 'orien' or 'tcga' (for fine-tuning)
-        genes: List of consensus genes to use
+        k: K value (number of top genes extracted)
+        gene_lists_dir: Directory with consensus gene lists
+        output_dir: Output directory for results
         seed: Random seed
-        device: 'cuda' or 'cpu'
-        output_dir: Where to save results
+        source_params: Path to source hyperparameters
+        target_params: Path to target hyperparameters
         verbose: Print progress
         
     Returns:
-        Dictionary with results
+        Dictionary with results for this k value
     """
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    if verbose:
+        print(f"\n{'='*80}")
+        print(f"EVALUATING k = {k}")
+        print(f"{'='*80}")
+    
+    # Load consensus genes
+    gene_file = gene_lists_dir / f'k{k}_bidirectional.txt'
+    
+    if not gene_file.exists():
+        print(f"  ⚠️  Gene list not found: {gene_file}")
+        return None
+    
+    genes = load_consensus_genes(gene_file)
+    n_genes = len(genes)
     
     if verbose:
-        print(f"\n  Transfer Learning: {source_cohort.upper()}→{target_cohort.upper()}")
-        print(f"    Using {len(genes)} consensus genes")
+        print(f"  Loaded {n_genes} consensus genes")
     
-    # ========================================
-    # Load data
-    # ========================================
+    # Create k-specific output directory
+    k_output_dir = output_dir / f'k{k}'
+    k_output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Create temporary gene file for this k
+    temp_gene_file = k_output_dir / 'consensus_genes.txt'
+    create_temp_gene_file(genes, temp_gene_file)
+    
+    # Run TCGA → ORIEN
     if verbose:
-        print(f"    Loading data...")
+        print(f"\n  Direction 1: TCGA → ORIEN")
     
-    source_data = load_data(source_cohort, genes)
-    target_data = load_data(target_cohort, genes)
+    tcga_to_orien_dir = k_output_dir / 'tcga_to_orien'
+    tcga_to_orien_dir.mkdir(exist_ok=True)
     
-    n_genes = len(source_data['expression'])  # Number of rows (genes)
-    n_source_samples = len(source_data['expression'].columns)  # Number of columns (samples)
-    n_target_samples = len(target_data['expression'].columns)
+    try:
+        tcga_to_orien_results = run_transfer_learning(
+            source_cohort='tcga',
+            target_cohort='orien',
+            gene_file=temp_gene_file,
+            output_dir=tcga_to_orien_dir,
+            seed=seed,
+            source_params=source_params,
+            target_params=target_params
+        )
+        
+        tcga_to_orien_cindex = (
+            tcga_to_orien_results.get('final_cindex') or
+            tcga_to_orien_results.get('finetune_cindex') or
+            tcga_to_orien_results.get('target_cindex', 0.0)
+        )
+        
+        if verbose:
+            print(f"  ✓ TCGA→ORIEN C-index: {tcga_to_orien_cindex:.4f}")
     
+    except Exception as e:
+        print(f"  ❌ Error in TCGA→ORIEN: {e}")
+        tcga_to_orien_cindex = None
+        tcga_to_orien_results = {}
+    
+    # Run ORIEN → TCGA
     if verbose:
-        print(f"    Source ({source_cohort}): {n_source_samples} samples, {n_genes} genes")
-        print(f"    Target ({target_cohort}): {n_target_samples} samples, {n_genes} genes")
+        print(f"\n  Direction 2: ORIEN → TCGA")
     
-    # ========================================
-    # Create datasets
-    # ========================================
+    orien_to_tcga_dir = k_output_dir / 'orien_to_tcga'
+    orien_to_tcga_dir.mkdir(exist_ok=True)
     
-    # Split target into train/val (80/20) based on sample IDs
-    from sklearn.model_selection import train_test_split
+    try:
+        orien_to_tcga_results = run_transfer_learning(
+            source_cohort='orien',
+            target_cohort='tcga',
+            gene_file=temp_gene_file,
+            output_dir=orien_to_tcga_dir,
+            seed=seed,
+            source_params=target_params,  # Note: swapped for direction
+            target_params=source_params,
+        )
+        
+        orien_to_tcga_cindex = (
+            orien_to_tcga_results.get('final_cindex') or
+            orien_to_tcga_results.get('finetune_cindex') or
+            orien_to_tcga_results.get('target_cindex', 0.0)
+        )
+        
+        if verbose:
+            print(f"  ✓ ORIEN→TCGA C-index: {orien_to_tcga_cindex:.4f}")
     
-    sample_ids = list(target_data['expression'].columns)
-    train_sample_ids, val_sample_ids = train_test_split(
-        sample_ids,
-        test_size=0.2,
-        random_state=seed,
-        stratify=target_data['survival']['event'].values
-    )
+    except Exception as e:
+        print(f"  ❌ Error in ORIEN→TCGA: {e}")
+        orien_to_tcga_cindex = None
+        orien_to_tcga_results = {}
     
-    # Create train/val splits
-    target_train_expr = target_data['expression'][train_sample_ids]
-    target_train_surv = target_data['survival'].loc[train_sample_ids]
-    target_val_expr = target_data['expression'][val_sample_ids]
-    target_val_surv = target_data['survival'].loc[val_sample_ids]
+    # Compute average if both succeeded
+    if tcga_to_orien_cindex and orien_to_tcga_cindex:
+        avg_cindex = (tcga_to_orien_cindex + orien_to_tcga_cindex) / 2
+    else:
+        avg_cindex = None
     
-    # Create datasets (SurvivalDataset expects genes × samples format)
-    source_dataset = SurvivalDataset(
-        source_data['expression'],
-        source_data['survival']
-    )
-    target_train_dataset = SurvivalDataset(target_train_expr, target_train_surv)
-    target_val_dataset = SurvivalDataset(target_val_expr, target_val_surv)
-    
-    # Create data loaders
-    source_sampler = StratifiedBatchSampler(
-        events=source_dataset.y_event,
-        batch_size=32,
-        shuffle=True
-    )
-    
-    source_loader = DataLoader(
-        source_dataset,
-        batch_sampler=source_sampler
-    )
-    
-    target_train_sampler = StratifiedBatchSampler(
-        events=target_train_dataset.y_event,
-        batch_size=32,
-        shuffle=True
-    )
-    
-    target_train_loader = DataLoader(
-        target_train_dataset,
-        batch_sampler=target_train_sampler
-    )
-    
-    target_val_loader = DataLoader(target_val_dataset, batch_size=32, shuffle=False)
-    
-    # ========================================
-    # Phase 1: Pre-train on source
-    # ========================================
-    
-    if verbose:
-        print(f"\n    Phase 1: Pre-training on {source_cohort.upper()}...")
-    
-    model = create_model(n_genes, device)
-    
-    pretrain_results = train_model(
-        model=model,
-        train_loader=source_loader,
-        val_loader=source_loader,  # Use source as validation during pre-training
-        device=device,
-        epochs=100,
-        lr=0.001,
-        patience=20,
-        verbose=verbose
-    )
-    
-    if verbose:
-        print(f"    Pre-training complete: C-index = {pretrain_results['best_val_cindex']:.4f}")
-    
-    # ========================================
-    # Phase 2: Fine-tune on target
-    # ========================================
-    
-    if verbose:
-        print(f"\n    Phase 2: Fine-tuning on {target_cohort.upper()}...")
-    
-    finetune_results = train_model(
-        model=model,
-        train_loader=target_train_loader,
-        val_loader=target_val_loader,
-        device=device,
-        epochs=50,
-        lr=0.0001,  # Lower learning rate for fine-tuning
-        patience=15,
-        verbose=verbose
-    )
-    
-    if verbose:
-        print(f"    Fine-tuning complete: C-index = {finetune_results['best_val_cindex']:.4f}")
-    
-    # ========================================
-    # Evaluate on full target cohort
-    # ========================================
-    
-    target_full_dataset = SurvivalDataset(target_data['expression'], target_data['survival'])
-    target_full_loader = DataLoader(target_full_dataset, batch_size=32, shuffle=False)
-    
-    final_cindex = evaluate_cindex(model, target_full_loader, device)
-    
-    if verbose:
-        print(f"    Final evaluation on full target: C-index = {final_cindex:.4f}")
-    
-    # ========================================
-    # Save model
-    # ========================================
-    
-    model_path = output_dir / f'{source_cohort}_to_{target_cohort}_seed{seed}.pth'
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'n_features': n_genes,
-        'genes': genes,
-        'pretrain_cindex': pretrain_results['best_val_cindex'],
-        'finetune_cindex': finetune_results['best_val_cindex'],
-        'final_cindex': final_cindex,
-        'seed': seed
-    }, model_path)
-    
-    return {
-        'source': source_cohort,
-        'target': target_cohort,
+    # Compile results
+    result = {
+        'k': k,
         'n_genes': n_genes,
-        'pretrain_cindex': pretrain_results['best_val_cindex'],
-        'finetune_cindex': finetune_results['best_val_cindex'],
-        'final_cindex': final_cindex,
-        'pretrain_epochs': pretrain_results['best_epoch'],
-        'finetune_epochs': finetune_results['best_epoch']
+        'tcga_to_orien_cindex': tcga_to_orien_cindex,
+        'orien_to_tcga_cindex': orien_to_tcga_cindex,
+        'average_cindex': avg_cindex,
+        'tcga_to_orien_details': tcga_to_orien_results,
+        'orien_to_tcga_details': orien_to_tcga_results,
+        'gene_file': str(temp_gene_file)
     }
+    
+    # Save k-specific results
+    with open(k_output_dir / 'results.json', 'w') as f:
+        json.dump(result, f, indent=2)
+    
+    if verbose:
+        print(f"\n  Summary for k={k}:")
+        print(f"    Genes: {n_genes}")
+        print(f"    TCGA→ORIEN: {tcga_to_orien_cindex:.4f if tcga_to_orien_cindex else 'Failed'}")
+        print(f"    ORIEN→TCGA: {orien_to_tcga_cindex:.4f if orien_to_tcga_cindex else 'Failed'}")
+        print(f"    Average: {avg_cindex:.4f if avg_cindex else 'N/A'}")
+    
+    return result
 
-
-# ============================================================================
-# MAIN FUNCTION
-# ============================================================================
 
 def run_consensus_ksweep(
     k_values: List[int],
     gene_lists_dir: str,
     output_dir: str,
     seed: int = 42,
-    device: str = None
+    source_params: str = 'results/hyperparam_FIXED_tcga_20251109_194909/best_params.json',
+    target_params: str = 'results/hyperparam_FIXED_orien_20251109_195430/best_params.json'
 ):
     """
-    Train and evaluate transfer learning for multiple k values.
+    Run consensus k-sweep evaluation using existing transfer_learning_trainer.py
     
     Args:
         k_values: List of k values to test
         gene_lists_dir: Directory containing consensus gene lists
         output_dir: Output directory for results
         seed: Random seed
-        device: 'cuda' or 'cpu' (auto-detect if None)
+        source_params: Path to TCGA hyperparameters
+        target_params: Path to ORIEN hyperparameters
     """
     # Setup
-    if device is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     gene_lists_path = Path(gene_lists_dir)
     
     print(f"{'='*80}")
-    print("CONSENSUS K-SWEEP EVALUATION")
+    print("CONSENSUS K-SWEEP EVALUATION (Using Existing Infrastructure)")
     print(f"{'='*80}\n")
     
     print(f"Configuration:")
-    print(f"  K values to test: {k_values}")
-    print(f"  Gene lists directory: {gene_lists_dir}")
-    print(f"  Output directory: {output_dir}")
-    print(f"  Random seed: {seed}")
-    print(f"  Device: {device}")
+    print(f"  K values: {k_values}")
+    print(f"  Gene lists: {gene_lists_dir}")
+    print(f"  Output: {output_dir}")
+    print(f"  Seed: {seed}")
+    print(f"  Source params (TCGA): {source_params}")
+    print(f"  Target params (ORIEN): {target_params}")
+    print(f"\n  Strategy: Using existing transfer_learning_trainer.py")
+    print(f"  Benefits: Proven code, no compatibility issues, faster!")
     print()
     
-    # ========================================
-    # Run transfer learning for each k
-    # ========================================
+    # Verify parameter files exist
+    if not Path(source_params).exists():
+        raise FileNotFoundError(f"Source params not found: {source_params}")
+    if not Path(target_params).exists():
+        raise FileNotFoundError(f"Target params not found: {target_params}")
     
+    # Run evaluation for each k
     all_results = []
     
     for i, k in enumerate(k_values, 1):
@@ -532,69 +368,19 @@ def run_consensus_ksweep(
         print(f"K-VALUE {i}/{len(k_values)}: k = {k}")
         print(f"{'='*80}")
         
-        # Load consensus genes for this k
-        gene_file = gene_lists_path / f'k{k}_bidirectional.txt'
-        
-        if not gene_file.exists():
-            print(f"  ⚠️  Gene list not found: {gene_file}")
-            print(f"      Skipping k={k}")
-            continue
-        
-        genes = load_consensus_genes(gene_file)
-        print(f"  Loaded {len(genes)} consensus genes from k={k}")
-        
-        # Create k-specific output directory
-        k_output_dir = output_path / f'k{k}'
-        k_output_dir.mkdir(exist_ok=True)
-        
-        # Run both directions
         try:
-            # TCGA → ORIEN
-            tcga_to_orien = transfer_learning_pipeline(
-                source_cohort='tcga',
-                target_cohort='orien',
-                genes=genes,
+            result = evaluate_k_value(
+                k=k,
+                gene_lists_dir=gene_lists_path,
+                output_dir=output_path,
                 seed=seed,
-                device=device,
-                output_dir=k_output_dir,
+                source_params=source_params,
+                target_params=target_params,
                 verbose=True
             )
             
-            # ORIEN → TCGA
-            orien_to_tcga = transfer_learning_pipeline(
-                source_cohort='orien',
-                target_cohort='tcga',
-                genes=genes,
-                seed=seed,
-                device=device,
-                output_dir=k_output_dir,
-                verbose=True
-            )
-            
-            # Compute average
-            avg_cindex = (tcga_to_orien['final_cindex'] + orien_to_tcga['final_cindex']) / 2
-            
-            # Store results
-            result = {
-                'k': k,
-                'n_genes': len(genes),
-                'tcga_to_orien_cindex': tcga_to_orien['final_cindex'],
-                'orien_to_tcga_cindex': orien_to_tcga['final_cindex'],
-                'average_cindex': avg_cindex,
-                'tcga_to_orien_details': tcga_to_orien,
-                'orien_to_tcga_details': orien_to_tcga
-            }
-            
-            all_results.append(result)
-            
-            print(f"\n  ✓ Results for k={k}:")
-            print(f"    TCGA→ORIEN: {tcga_to_orien['final_cindex']:.4f}")
-            print(f"    ORIEN→TCGA: {orien_to_tcga['final_cindex']:.4f}")
-            print(f"    Average: {avg_cindex:.4f}")
-            
-            # Save k-specific results
-            with open(k_output_dir / 'results.json', 'w') as f:
-                json.dump(result, f, indent=2)
+            if result:
+                all_results.append(result)
         
         except Exception as e:
             print(f"\n  ❌ Error processing k={k}: {e}")
@@ -602,17 +388,14 @@ def run_consensus_ksweep(
             traceback.print_exc()
             continue
     
-    # ========================================
-    # Generate comparison table
-    # ========================================
+    # Generate summary
+    if not all_results:
+        print("\n❌ No results to summarize!")
+        return
     
     print(f"\n{'='*80}")
     print("GENERATING COMPARISON TABLE")
     print(f"{'='*80}\n")
-    
-    if not all_results:
-        print("❌ No results to compare!")
-        return
     
     # Create summary DataFrame
     summary_data = []
@@ -620,9 +403,9 @@ def run_consensus_ksweep(
         summary_data.append({
             'k': r['k'],
             'n_genes': r['n_genes'],
-            'TCGA_to_ORIEN': f"{r['tcga_to_orien_cindex']:.4f}",
-            'ORIEN_to_TCGA': f"{r['orien_to_tcga_cindex']:.4f}",
-            'Average': f"{r['average_cindex']:.4f}"
+            'TCGA_to_ORIEN': f"{r['tcga_to_orien_cindex']:.4f}" if r['tcga_to_orien_cindex'] else 'Failed',
+            'ORIEN_to_TCGA': f"{r['orien_to_tcga_cindex']:.4f}" if r['orien_to_tcga_cindex'] else 'Failed',
+            'Average': f"{r['average_cindex']:.4f}" if r['average_cindex'] else 'N/A'
         })
     
     summary_df = pd.DataFrame(summary_data)
@@ -630,106 +413,107 @@ def run_consensus_ksweep(
     
     print(summary_df.to_string(index=False))
     
-    # Find best k
-    best_result = max(all_results, key=lambda r: r['average_cindex'])
+    # Find best k (if any completed successfully)
+    valid_results = [r for r in all_results if r['average_cindex'] is not None]
     
-    print(f"\n{'='*80}")
-    print("RECOMMENDATION")
-    print(f"{'='*80}\n")
+    if valid_results:
+        best_result = max(valid_results, key=lambda r: r['average_cindex'])
+        
+        print(f"\n{'='*80}")
+        print("RECOMMENDATION")
+        print(f"{'='*80}\n")
+        
+        print(f"🎯 OPTIMAL k = {best_result['k']}")
+        print(f"   - Number of genes: {best_result['n_genes']}")
+        print(f"   - TCGA→ORIEN C-index: {best_result['tcga_to_orien_cindex']:.4f}")
+        print(f"   - ORIEN→TCGA C-index: {best_result['orien_to_tcga_cindex']:.4f}")
+        print(f"   - Average C-index: {best_result['average_cindex']:.4f}")
     
-    print(f"🎯 OPTIMAL k = {best_result['k']}")
-    print(f"   - Number of genes: {best_result['n_genes']}")
-    print(f"   - TCGA→ORIEN C-index: {best_result['tcga_to_orien_cindex']:.4f}")
-    print(f"   - ORIEN→TCGA C-index: {best_result['orien_to_tcga_cindex']:.4f}")
-    print(f"   - Average C-index: {best_result['average_cindex']:.4f}")
-    print(f"   - Rationale: Highest average C-index across both directions")
-    
-    # ========================================
-    # Save final results
-    # ========================================
-    
+    # Save results
     print(f"\n{'='*80}")
     print("SAVING RESULTS")
     print(f"{'='*80}\n")
     
-    # Save summary table
     summary_df.to_csv(output_path / 'consensus_ksweep_summary.csv', index=False)
     print(f"✓ Summary table: consensus_ksweep_summary.csv")
     
-    # Save full results
     with open(output_path / 'consensus_ksweep_full_results.json', 'w') as f:
         json.dump(all_results, f, indent=2)
     print(f"✓ Full results: consensus_ksweep_full_results.json")
     
-    # Save recommendation
-    with open(output_path / 'RECOMMENDATION.txt', 'w') as f:
-        f.write(f"OPTIMAL K-VALUE SELECTION\n")
-        f.write(f"{'='*80}\n\n")
-        f.write(f"Recommended k: {best_result['k']}\n")
-        f.write(f"Number of genes: {best_result['n_genes']}\n")
-        f.write(f"TCGA→ORIEN C-index: {best_result['tcga_to_orien_cindex']:.4f}\n")
-        f.write(f"ORIEN→TCGA C-index: {best_result['orien_to_tcga_cindex']:.4f}\n")
-        f.write(f"Average C-index: {best_result['average_cindex']:.4f}\n\n")
-        f.write(f"This k value maximizes predictive performance while maintaining\n")
-        f.write(f"reasonable gene count for clinical translation.\n")
-    
-    print(f"✓ Recommendation: RECOMMENDATION.txt")
+    if valid_results:
+        with open(output_path / 'RECOMMENDATION.txt', 'w') as f:
+            f.write(f"OPTIMAL K-VALUE SELECTION\n")
+            f.write(f"{'='*80}\n\n")
+            f.write(f"Recommended k: {best_result['k']}\n")
+            f.write(f"Number of genes: {best_result['n_genes']}\n")
+            f.write(f"TCGA→ORIEN C-index: {best_result['tcga_to_orien_cindex']:.4f}\n")
+            f.write(f"ORIEN→TCGA C-index: {best_result['orien_to_tcga_cindex']:.4f}\n")
+            f.write(f"Average C-index: {best_result['average_cindex']:.4f}\n\n")
+            f.write(f"Gene list: {best_result['gene_file']}\n")
+        
+        print(f"✓ Recommendation: RECOMMENDATION.txt")
     
     print(f"\n{'='*80}")
     print("CONSENSUS K-SWEEP EVALUATION COMPLETE")
     print(f"{'='*80}\n")
     
+    print(f"Results saved in: {output_dir}/")
+    print(f"\nNext steps:")
+    print(f"  1. Review: {output_dir}/consensus_ksweep_summary.csv")
+    print(f"  2. Check: {output_dir}/RECOMMENDATION.txt")
+    print(f"  3. Examine models in: {output_dir}/k*/")
+    
     return summary_df
 
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train and evaluate transfer learning with consensus genes from k-sweep",
+        description="Consensus k-sweep wrapper using existing transfer_learning_trainer.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
   # Test representative k values (recommended)
-  python scripts/train_consensus_ksweep.py \
-      --k_values 90 95 100 120 140 \
-      --gene_lists_dir results/biomarker_ksweep_transfer/gene_lists \
+  python scripts/consensus_ksweep_wrapper.py \\
+      --k_values 90 95 100 120 140 150 \\
+      --gene_lists_dir results/biomarker_ksweep_transfer/gene_lists \\
       --output_dir results/consensus_ksweep_evaluation
   
-  # Test all k values (comprehensive but slower)
-  python scripts/train_consensus_ksweep.py \
-      --k_values 60 70 80 90 95 100 110 120 130 140 150 \
-      --gene_lists_dir results/biomarker_ksweep_transfer/gene_lists \
-      --output_dir results/consensus_ksweep_evaluation_full
+  # Specify custom hyperparameter files
+  python scripts/consensus_ksweep_wrapper.py \\
+      --k_values 90 100 120 \\
+      --source_params results/hyperparam_FIXED_tcga_20251109_194909/best_params.json \\
+      --target_params results/hyperparam_FIXED_orien_20251109_195430/best_params.json
         """
     )
     
     parser.add_argument('--k_values', type=int, nargs='+',
-                       default=[90, 95, 100, 120, 140],
-                       help='K values to test (default: 90 95 100 120 140)')
+                       default=[90, 95, 100, 120, 140, 150],
+                       help='K values to test')
     parser.add_argument('--gene_lists_dir', type=str,
                        default='results/biomarker_ksweep_transfer/gene_lists',
-                       help='Directory containing consensus gene lists')
+                       help='Directory with consensus gene lists')
     parser.add_argument('--output_dir', type=str,
                        default='results/consensus_ksweep_evaluation',
-                       help='Output directory for results')
+                       help='Output directory')
     parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed (default: 42)')
-    parser.add_argument('--device', type=str, default=None,
-                       help='Device to use (cuda/cpu, default: auto-detect)')
+                       help='Random seed')
+    parser.add_argument('--source_params', type=str,
+                       default='results/hyperparam_FIXED_tcga_20251109_194909/best_params.json',
+                       help='TCGA hyperparameters JSON')
+    parser.add_argument('--target_params', type=str,
+                       default='results/hyperparam_FIXED_orien_20251109_195430/best_params.json',
+                       help='ORIEN hyperparameters JSON')
     
     args = parser.parse_args()
     
-    # Run evaluation
     summary_df = run_consensus_ksweep(
         k_values=args.k_values,
         gene_lists_dir=args.gene_lists_dir,
         output_dir=args.output_dir,
         seed=args.seed,
-        device=args.device
+        source_params=args.source_params,
+        target_params=args.target_params
     )
     
     print("\n✅ Consensus k-sweep evaluation completed successfully!")
-    print(f"📁 Results saved in: {args.output_dir}/")
