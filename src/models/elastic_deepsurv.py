@@ -174,7 +174,7 @@ class ElasticDeepSurvTrainer:
         n_batches = 0
         
         n_params = sum(p.numel() for p in self.model.parameters())
-        expected_norm = np.sqrt(n_params) * 0.01  # Baseline expectation
+        expected_norm = np.sqrt(n_params) * 0.5
         
         for batch_idx, batch in enumerate(train_loader):
             features = batch['features'].to(self.device)
@@ -403,7 +403,7 @@ class ElasticDeepSurvTrainer:
                         f"({final_sparsity['n_zeros']} / {final_sparsity['n_total']} weights zeroed).")
         
         # Add best_epoch to history
-        self.history['best_epoch'] = best_epoch  # ← ADD THIS!
+        self.history['best_epoch'] = best_epoch 
         
         return self.history
     
