@@ -162,10 +162,19 @@ def train_model(
         model.train()
         train_losses = []
         
-        for batch_idx, (x, time, event) in enumerate(train_loader):
-            x = x.to(device)
-            time = time.to(device)
-            event = event.to(device)
+        for batch_idx, batch in enumerate(train_loader):
+            # Batch is a tuple: (x, y) where y is a dict/array with time and event
+            x = batch[0].to(device)
+            y = batch[1]  # This is the survival data
+            
+            # Extract time and event from y
+            if isinstance(y, dict):
+                time = y['time'].to(device)
+                event = y['event'].to(device)
+            else:
+                # y is a 2D array/tensor: [:, 0] is time, [:, 1] is event
+                time = y[:, 0].to(device)
+                event = y[:, 1].to(device)
             
             optimizer.zero_grad()
             risk = model(x)
@@ -226,13 +235,24 @@ def evaluate_cindex(
     all_events = []
     
     with torch.no_grad():
-        for x, time, event in data_loader:
-            x = x.to(device)
+        for batch in data_loader:
+            x = batch[0].to(device)
+            y = batch[1]
+            
+            # Extract time and event from y
+            if isinstance(y, dict):
+                time = y['time'].cpu().numpy()
+                event = y['event'].cpu().numpy()
+            else:
+                # y is a 2D array/tensor
+                time = y[:, 0].cpu().numpy() if isinstance(y, torch.Tensor) else y[:, 0]
+                event = y[:, 1].cpu().numpy() if isinstance(y, torch.Tensor) else y[:, 1]
+            
             risk = model(x)
             
             all_risks.extend(risk.cpu().numpy())
-            all_times.extend(time.numpy())
-            all_events.extend(event.numpy())
+            all_times.extend(time)
+            all_events.extend(event)
     
     # Compute C-index
     all_risks = np.array(all_risks)
