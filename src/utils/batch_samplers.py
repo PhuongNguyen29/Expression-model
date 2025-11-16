@@ -51,7 +51,7 @@ class StratifiedBatchSampler(Sampler):
         self,
         events: np.ndarray,
         batch_size: int,
-        min_events_per_batch: int = 1,
+        min_events_per_batch: int = 2,
         shuffle: bool = True,
         drop_last: bool = False
     ):
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     sampler = StratifiedBatchSampler(
         events=events,
         batch_size=32,
-        min_events_per_batch=1,
+        min_events_per_batch=2,
         shuffle=False
     )
     

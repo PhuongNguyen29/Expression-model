@@ -118,6 +118,16 @@ class GeneExpressionPreprocessor:
             
             tcga_scaled = self.scaler_tcga.transform(tcga_T)
             orien_scaled = self.scaler_orien.transform(orien_T)
+            
+        logger.info("Clipping outliers to ±3 standard deviations...")
+        tcga_before_clip = np.sum(np.abs(tcga_scaled) > 2.9)
+        orien_before_clip = np.sum(np.abs(orien_scaled) > 2.9)
+
+        tcga_scaled = np.clip(tcga_scaled, -3.0, 3.0)
+        orien_scaled = np.clip(orien_scaled, -3.0, 3.0)
+
+        logger.info(f"  TCGA: {tcga_before_clip} values clipped ({100*tcga_before_clip/tcga_scaled.size:.2f}%)")
+        logger.info(f"  ORIEN: {orien_before_clip} values clipped ({100*orien_before_clip/orien_scaled.size:.2f}%)")
         
         # Convert back to DataFrames and transpose back (genes × samples)
         tcga_standardized = pd.DataFrame(
@@ -282,6 +292,11 @@ class GeneExpressionPreprocessor:
             scaled_T = scaler.fit_transform(filtered.T)
             self.scaler = scaler  # Store fitted scaler
             
+            logger.info("Clipping outliers to ±3 std...")
+            n_clipped = np.sum(np.abs(scaled_T) > 2.9)
+            scaled_T = np.clip(scaled_T, -3.0, 3.0)
+            logger.info(f"  {n_clipped} values clipped ({100*n_clipped/scaled_T.size:.2f}%)")
+        
             # Transpose back: genes as rows
             result = pd.DataFrame(
                 scaled_T.T,

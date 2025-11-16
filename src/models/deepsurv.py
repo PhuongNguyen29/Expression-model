@@ -274,7 +274,7 @@ class DeepSurvTrainer:
         self,
         model: DeepSurv,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        learning_rate: float = 0.001,
+        learning_rate: float = 0.0001,
         weight_decay: float = 0.01,
         scheduler_patience: int = 10
     ):

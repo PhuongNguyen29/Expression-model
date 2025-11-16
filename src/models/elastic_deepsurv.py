@@ -181,10 +181,6 @@ class ElasticDeepSurvTrainer:
             times = batch['time'].to(self.device)
             events = batch['event'].to(self.device)
             
-            # # Check for events in batch (should never happen with StratifiedBatchSampler)
-            # if events.sum() == 0:
-            #     logger.warning(f"Batch {batch_idx} has no events! Skipping.")
-            #     continue
             
             self.optimizer.zero_grad()
             # Forward pass
@@ -214,9 +210,9 @@ class ElasticDeepSurvTrainer:
                 continue
             
             # Adaptive thresholds based on parameter count
-            warn_threshold = 2.0 * expected_norm  # 2× expected
-            clip_threshold = 3.0 * expected_norm  # 3× expected
-            explode_threshold = 5.0 * expected_norm  # 5× expected
+            warn_threshold = 1.5 * expected_norm  # 2× expected
+            clip_threshold = 2.0 * expected_norm  # 3× expected
+            explode_threshold = 3.0 * expected_norm  # 5× expected
             
             # Handle gradient magnitude
             if total_norm > explode_threshold:
@@ -234,7 +230,7 @@ class ElasticDeepSurvTrainer:
                 )
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
-                    max_norm=clip_threshold
+                    max_norm=1.0
                 )
             
             elif total_norm > warn_threshold:

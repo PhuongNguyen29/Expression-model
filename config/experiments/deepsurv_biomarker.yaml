@@ -16,13 +16,13 @@ dataset:
   tcga_survival: "surv_tcga.csv"
   orien_survival: "surv_orien_update.csv"
   use_common_genes: true
-  min_variance_percentile: 0  # Pre-selected genes
+  min_variance_percentile: 0 # Pre-selected genes
   standardize: true
 
 # Model configuration
 model:
   type: "deepsurv"
-  hidden_sizes: [128, 64]  # Small network for biomarker genes
+  hidden_sizes: [128, 64] # Small network for biomarker genes
   dropout: 0.2
   activation: "relu"
   batch_norm: true
