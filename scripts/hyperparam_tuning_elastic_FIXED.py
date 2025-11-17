@@ -218,7 +218,7 @@ class LeakageFreeHyperparameterTuner:
                     '128-32']) # 5.72M params - moderate funnel
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
-            batch_size = trial.suggest_categorical('batch_size', [32, 48])
+            batch_size = trial.suggest_categorical('batch_size', [16,24])
             alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
         else:  # ORIEN
             n_layers = trial.suggest_int('n_layers', 2, 3)
@@ -285,19 +285,23 @@ class LeakageFreeHyperparameterTuner:
             # CREATE STRATIFIED BATCH SAMPLER (NEW - CRITICAL FIX)
             # ============================================================
             
-            train_batch_sampler = StratifiedBatchSampler(
-                events=train_events,
-                batch_size=batch_size,
-                min_events_per_batch=1,  # Guarantee at least 1 event per batch
-                shuffle=True,
-                drop_last=False
-            )
-            
-            # Create data loaders
-            train_loader = DataLoader(
-                train_dataset,
-                batch_sampler=train_batch_sampler  # Use custom sampler
-            )
+            if self.n_samples >= 500:  # ORIEN - large cohort
+                train_batch_sampler = StratifiedBatchSampler(
+                    events=train_events,
+                    batch_size=batch_size,
+                    min_events_per_batch=2,
+                    shuffle=True,
+                    drop_last=False
+                )
+                train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
+                
+            else:  # TCGA - small cohort
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    drop_last=False
+                )
             
             # Validation doesn't need stratified sampling (no gradient computation)
             val_loader = DataLoader(

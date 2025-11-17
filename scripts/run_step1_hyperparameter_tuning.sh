@@ -130,56 +130,56 @@ log "  CV folds: ${N_FOLDS}"
 log "  Random seed: ${SEED}"
 echo ""
 
-################################################################################
-# STEP 1.1: HYPERPARAMETER TUNING ON ORIEN (SOURCE COHORT)
-################################################################################
+# ################################################################################
+# # STEP 1.1: HYPERPARAMETER TUNING ON ORIEN (SOURCE COHORT)
+# ################################################################################
 
-log "=========================================="
-log "STEP 1.1: TUNING ORIEN (Source Cohort)"
-log "=========================================="
-echo ""
+# log "=========================================="
+# log "STEP 1.1: TUNING ORIEN (Source Cohort)"
+# log "=========================================="
+# echo ""
 
-ORIEN_OUTPUT="${STEP1_DIR}/orien_308genes"
-ORIEN_LOG="${STEP1_DIR}/logs/orien_tuning_${TIMESTAMP}.log"
+# ORIEN_OUTPUT="${STEP1_DIR}/orien_308genes"
+# ORIEN_LOG="${STEP1_DIR}/logs/orien_tuning_${TIMESTAMP}.log"
 
-log "Configuration:"
-log "  Cohort: ORIEN (n=1,112 samples, 450 events)"
-log "  Features: 308 consensus genes"
-log "  Output: ${ORIEN_OUTPUT}"
-log "  Log file: ${ORIEN_LOG}"
-echo ""
+# log "Configuration:"
+# log "  Cohort: ORIEN (n=1,112 samples, 450 events)"
+# log "  Features: 308 consensus genes"
+# log "  Output: ${ORIEN_OUTPUT}"
+# log "  Log file: ${ORIEN_LOG}"
+# echo ""
 
-log "Starting hyperparameter optimization..."
-log "This may take 1-3 hours depending on hardware..."
-echo ""
+# log "Starting hyperparameter optimization..."
+# log "This may take 1-3 hours depending on hardware..."
+# echo ""
 
-if python scripts/hyperparam_tuning_elastic_FIXED.py \
-    --cohort orien \
-    --n_trials ${N_TRIALS} \
-    --output_dir "${ORIEN_OUTPUT}" \
-    2>&1 | tee "${ORIEN_LOG}"; then
+# if python scripts/hyperparam_tuning_elastic_FIXED.py \
+#     --cohort orien \
+#     --n_trials ${N_TRIALS} \
+#     --output_dir "${ORIEN_OUTPUT}" \
+#     2>&1 | tee "${ORIEN_LOG}"; then
     
-    success "✓ ORIEN hyperparameter tuning completed"
+#     success "✓ ORIEN hyperparameter tuning completed"
     
-    # Check if output files were created
-    if [ -f "${ORIEN_OUTPUT}/best_params.json" ]; then
-        success "  ✓ best_params.json created"
-        log "  Best parameters:"
-        python -c "import json; print(json.dumps(json.load(open('${ORIEN_OUTPUT}/best_params.json')), indent=2))" | head -20
-    else
-        error "  ✗ best_params.json not found"
-        exit 1
-    fi
+#     # Check if output files were created
+#     if [ -f "${ORIEN_OUTPUT}/best_params.json" ]; then
+#         success "  ✓ best_params.json created"
+#         log "  Best parameters:"
+#         python -c "import json; print(json.dumps(json.load(open('${ORIEN_OUTPUT}/best_params.json')), indent=2))" | head -20
+#     else
+#         error "  ✗ best_params.json not found"
+#         exit 1
+#     fi
     
-else
-    error "✗ ORIEN hyperparameter tuning failed"
-    error "Check log file: ${ORIEN_LOG}"
-    exit 1
-fi
+# else
+#     error "✗ ORIEN hyperparameter tuning failed"
+#     error "Check log file: ${ORIEN_LOG}"
+#     exit 1
+# fi
 
-echo ""
-log "ORIEN tuning checkpoint passed ✓"
-echo ""
+# echo ""
+# log "ORIEN tuning checkpoint passed ✓"
+# echo ""
 
 ################################################################################
 # STEP 1.2: HYPERPARAMETER TUNING ON TCGA (TARGET COHORT)
