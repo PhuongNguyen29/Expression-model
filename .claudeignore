@@ -1,0 +1,43 @@
+# ============================================================================
+# Claude Code Access Control - Local Development Mode
+# ============================================================================
+# Since real data is on IDAS, this protects any local test data
+# ============================================================================
+
+# Any local data files
+data/**/*.csv
+data/**/*.tsv
+data/**/*.h5
+
+# But allow metadata summaries
+!data/metadata/**
+
+# Model weights (large files)
+*.pth
+*.pt
+*.pkl
+
+# Results with individual predictions
+results/**/predictions*.csv
+results/**/risk_scores*.csv
+
+# But allow summary results
+!results/summaries/**
+!results/**/summary.json
+!results/**/comparison_table.csv
+!results/**/overlap_statistics.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Large logs
+logs/*_detailed.log
+
+# OS files
+.DS_Store
+Thumbs.db
