@@ -1,41 +1,27 @@
-#!/usr/bin/env python3
 """
-Hyperparameter tuning with proper cross-validation (no data leakage) and gradient fixes.
+Hyperparameter tuning with PROPER cross-validation (no data leakage).
 
-CRITICAL FIXES IMPLEMENTED:
-1. Xavier initialization DISABLED when BatchNorm=True (incompatible, causes gradient issues)
-2. Adaptive gradient thresholds based on parameter count
-3. Proper CV with independent preprocessing per fold
+Key changes from original:
+1. Load RAW data (not preprocessed)
+2. Fit preprocessor inside each CV fold
+3. Each fold gets independent preprocessing
 
-Evidence Base:
-- Simon et al., 2003: "Pitfalls in DNA microarray data analysis"
-- Ambroise & McLachlan, 2002: "Selection bias in gene extraction"
-- Glorot & Bengio, 2010: Xavier initialization
-- He et al., 2015: Kaiming initialization for ReLU networks
-
-Author: Phuong
-Date: 2024-11-17
-Status: ACTIVE - Step 1 of transfer learning pipeline
+Based on:
+- Simon et al. (2003), "Pitfalls in DNA microarray data"
+- Ambroise & McLachlan (2002), "Selection bias in gene extraction"
 """
 
 import sys
-import os
-
-# Add project root to path
-sys.path.insert(0, os.path.abspath('.'))
+sys.path.append('.')
 
 import torch
 import pandas as pd
 import numpy as np
 import logging
-import argparse
 from datetime import datetime
 import optuna
 from sklearn.model_selection import StratifiedKFold
 from pathlib import Path
-import yaml
-import json
-import pickle
 
 from src.data.preprocessor import GeneExpressionPreprocessor
 from src.data.dataset import SurvivalDataset
@@ -43,13 +29,9 @@ from torch.utils.data import DataLoader
 from src.models.elastic_deepsurv import ElasticDeepSurv, ElasticDeepSurvTrainer
 from src.utils.batch_samplers import StratifiedBatchSampler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-
 
 def create_survival_stratification_bins(
     times: np.ndarray,
@@ -105,94 +87,60 @@ def create_survival_stratification_bins(
     
     return strat_bins
 
-
 class LeakageFreeHyperparameterTuner:
     """
-    Hyperparameter tuner with proper CV preprocessing and gradient fixes.
+    Hyperparameter tuner with proper CV preprocessing.
     
-    Key Features:
-    1. Proper CV: Fit preprocessor only on training folds
-    2. Gradient-safe: Xavier disabled with BatchNorm
-    3. Stratification: Balanced event/time distribution
+    Ensures unbiased performance estimation by:
+    1. Fitting preprocessor only on training folds
+    2. Transforming test folds with training parameters
+    3. No information leakage from test to train
     """
     
     def __init__(
-        self,
-        config: dict,
-        cohort_name: str,
-        n_folds: int = 5,
-        seed: int = 42
+    self,
+    train_expr_raw: pd.DataFrame,
+    train_surv: pd.DataFrame,
+    config: dict,
+    cohort_name: str = None,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+    seed: int = 42
     ):
-        """
-        Initialize tuner with configuration.
-        
-        Args:
-            config: Configuration dictionary
-            cohort_name: 'tcga' or 'orien'
-            n_folds: Number of CV folds
-            seed: Random seed
-        """
+        self.train_expr_raw = train_expr_raw
+        self.train_surv = train_surv
         self.config = config
         self.cohort_name = cohort_name
-        self.n_folds = n_folds
+        self.device = device
         self.seed = seed
         
-        # Load RAW data (not preprocessed - critical for proper CV)
-        self._load_raw_data()
+        self.n_samples = train_expr_raw.shape[1]
+        self.n_genes_raw = train_expr_raw.shape[0]
         
-        # Set random seeds
-        self._set_seeds(seed)
+        # For stratification
+        self.events = train_surv['event'].values
+        self.times = train_surv['time'].values
         
-        # Create stratification bins for survival analysis
+        # Create enhanced stratification bins (event + time)
         self.strat_bins = create_survival_stratification_bins(
             self.times,
-            self.events
+            self.events,
+            n_time_bins=4
         )
         
-    def _load_raw_data(self):
-        """Load RAW batch-corrected data (before IQR filtering)."""
-        data_config = self.config['data']
-        raw_dir = Path(data_config['raw_data_dir'])
+        self.n_folds = 5
         
-        logger.info(f"Loading RAW data for {self.cohort_name}...")
-        
-        # Load expression data
-        if self.cohort_name == 'tcga':
-            expr_file = raw_dir / data_config['tcga_expression']
-            surv_file = raw_dir / data_config['tcga_survival']
-        else:  # orien
-            expr_file = raw_dir / data_config['orien_expression']
-            surv_file = raw_dir / data_config['orien_survival']
-        
-        self.train_expr_raw = pd.read_csv(expr_file, index_col=0)
-        self.train_surv = pd.read_csv(surv_file, index_col=0)
-        
-        # Align samples
-        common_samples = self.train_expr_raw.columns.intersection(self.train_surv.index)
-        self.train_expr_raw = self.train_expr_raw[common_samples]
-        self.train_surv = self.train_surv.loc[common_samples]
-        
-        # Filter to 308 consensus genes
-        consensus_file = raw_dir / 'consensus_genes_308.txt'
-        with open(consensus_file, 'r') as f:
-            consensus_genes = [line.strip() for line in f if line.strip()]
-        
-        # Keep only consensus genes present in this cohort
-        available_genes = [g for g in consensus_genes if g in self.train_expr_raw.index]
-        self.train_expr_raw = self.train_expr_raw.loc[available_genes]
-        
-        self.n_samples = len(common_samples)
-        self.n_genes_raw = len(available_genes)
-        self.times = self.train_surv['time'].values
-        self.events = self.train_surv['event'].values
-        
+        logger.info(f"LeakageFreeHyperparameterTuner initialized")
+        logger.info(f"  Cohort: {cohort_name}")
         logger.info(f"  Samples: {self.n_samples}")
-        logger.info(f"  Genes (308 consensus): {self.n_genes_raw}")
-        logger.info(f"  Events: {self.events.sum()} ({self.events.mean():.1%})")
-        logger.info(f"  Median survival: {np.median(self.times):.0f} days")
+        logger.info(f"  Raw genes: {self.n_genes_raw}")
+        logger.info(f"  Event rate: {self.events.mean():.1%}")
+        logger.info(f"  Median survival: {np.median(self.times):.0f}")
+        logger.info(f"  Stratification bins: {len(np.unique(self.strat_bins))}")
+        
+        self._set_seed(seed)
     
-    def _set_seeds(self, seed: int):
-        """Set all random seeds for reproducibility."""
+    def _set_seed(self, seed: int):
+        """Set all random seeds."""
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
@@ -201,9 +149,9 @@ class LeakageFreeHyperparameterTuner:
         torch.backends.cudnn.benchmark = False
     
     def preprocess_fold(
-        self,
-        train_indices: np.ndarray,
-        val_indices: np.ndarray
+    self,
+    train_indices: np.ndarray,
+    val_indices: np.ndarray
     ):
         """
         Preprocess one CV fold with proper train/test separation.
@@ -248,72 +196,64 @@ class LeakageFreeHyperparameterTuner:
     
     def objective(self, trial: optuna.Trial) -> float:
         """
-        Optuna objective with proper CV preprocessing and gradient-safe hyperparameters.
+        Optuna objective with proper CV preprocessing.
         
         Returns:
             Mean C-index across folds
         """
-        # Sample hyperparameters based on cohort size
-        if self.n_samples < 500:  # TCGA (small cohort)
+        # Sample hyperparameters
+        if self.n_samples < 500:  # TCGA
             n_layers = trial.suggest_int('n_layers', 1, 2)
             if n_layers == 1:
                 layer1_size = trial.suggest_categorical('layer1_size', [64, 128, 256])
                 hidden_sizes = [layer1_size]
                 alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
             else:  # n_layers == 2
+            # Two layers: use predefined patterns to avoid Optuna conflicts
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['256-64', '256-128', '128-64', '128-32']
-                )
+                    ['256-64',   # 308→256→64: 79K params
+                    '256-128',  # 308→256→128: 113K params
+                    '128-64',   # 308→128→64: 47K params - conservative
+                    '128-32']) # 5.72M params - moderate funnel
                 hidden_sizes = [int(x) for x in architecture.split('-')]
-                alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
             dropout = trial.suggest_categorical('dropout', [0.2, 0.3, 0.4])
             batch_size = trial.suggest_categorical('batch_size', [32, 48])
-            
-        else:  # ORIEN (large cohort)
+            alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
+        else:  # ORIEN
             n_layers = trial.suggest_int('n_layers', 2, 3)
             if n_layers == 2:
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['256-128', '256-64', '128-64', '192-96']
-                )
+                    ['256-128',  # 308→256→128: 113K params
+                    '256-64',   # 308→256→64: 79K params
+                    '128-64',   # 308→128→64: 47K params
+                    '192-96'])
                 hidden_sizes = [int(x) for x in architecture.split('-')]
-            else:  # n_layers == 3
+            else:
                 architecture = trial.suggest_categorical(
-                    'architecture_3layer',
-                    ['256-128-32', '192-96-32', '128-64-32']
-                )
+                'architecture_3layer',
+                ['256-128-32',   # 308→256→128→32: 117K params
+                 '192-96-32',    # 308→192→96→32: 78K params
+                 '128-64-32'])   # 308→128→64→32: 47K params
                 hidden_sizes = [int(x) for x in architecture.split('-')]
             dropout = trial.suggest_categorical('dropout', [0.3, 0.4, 0.5])
             batch_size = trial.suggest_categorical('batch_size', [32, 64])
             alpha = trial.suggest_float('alpha', 5e-6, 1e-4, log=True)
         
-        # Common hyperparameters
         activation = trial.suggest_categorical('activation', ['relu', 'elu'])
         batch_norm = trial.suggest_categorical('batch_norm', [True, False])
-        
-        # CRITICAL FIX: Prevent Xavier+BatchNorm combination
-        # Based on Chapter 4 gradient explosion analysis
         if batch_norm:
             weight_init = 'kaiming_uniform'  # Always use Kaiming with BatchNorm
-            logger.debug("  Using kaiming_uniform (BatchNorm enabled)")
         else:
-            weight_init = trial.suggest_categorical(
-                'weight_init',
-                ['xavier_normal', 'kaiming_uniform']
-            )
-            logger.debug(f"  Using {weight_init} (BatchNorm disabled)")
+            weight_init = trial.suggest_categorical('weight_init', ['xavier_normal', 'kaiming_uniform'])
         
-        # Elastic Net parameters
+        # ElasticDeepSurv-specific parameters
+        # alpha = trial.suggest_float('alpha', 1e-4, 1e-2, log=True)
         l1_ratio = trial.suggest_categorical('l1_ratio', [0.3, 0.5, 0.7, 0.9])
         learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
         
-        # Cross-validation
-        skf = StratifiedKFold(
-            n_splits=self.n_folds,
-            shuffle=True,
-            random_state=self.seed
-        )
+        skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
         cv_scores = []
         
         for fold, (train_idx, val_idx) in enumerate(skf.split(
@@ -326,13 +266,13 @@ class LeakageFreeHyperparameterTuner:
             train_median_time = np.median(self.times[train_idx])
             val_median_time = np.median(self.times[val_idx])
             
-            logger.info(f"\n  Trial {trial.number}, Fold {fold+1}/{self.n_folds}:")
+            logger.info(f"\n  Fold {fold+1}/{self.n_folds}:")
             logger.info(f"    Train: {len(train_idx)} samples, "
-                       f"{train_event_rate:.1%} events, "
-                       f"median time = {train_median_time:.0f}")
+                    f"{train_event_rate:.1%} events, "
+                    f"median time = {train_median_time:.0f}")
             logger.info(f"    Val:   {len(val_idx)} samples, "
-                       f"{val_event_rate:.1%} events, "
-                       f"median time = {val_median_time:.0f}")
+                    f"{val_event_rate:.1%} events, "
+                    f"median time = {val_median_time:.0f}")
             
             # CRITICAL: Preprocess this fold independently
             train_dataset, val_dataset, n_features, train_events = self.preprocess_fold(
@@ -341,41 +281,35 @@ class LeakageFreeHyperparameterTuner:
             
             logger.info(f"    Features after preprocessing: {n_features}")
             
-            # Create stratified batch sampler
-            train_sampler = StratifiedBatchSampler(
+            # ============================================================
+            # CREATE STRATIFIED BATCH SAMPLER (NEW - CRITICAL FIX)
+            # ============================================================
+            
+            train_batch_sampler = StratifiedBatchSampler(
                 events=train_events,
                 batch_size=batch_size,
-                shuffle=True
+                min_events_per_batch=1,  # Guarantee at least 1 event per batch
+                shuffle=True,
+                drop_last=False
             )
             
             # Create data loaders
             train_loader = DataLoader(
                 train_dataset,
-                batch_sampler=train_sampler,
-                num_workers=0
+                batch_sampler=train_batch_sampler  # Use custom sampler
             )
             
+            # Validation doesn't need stratified sampling (no gradient computation)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=batch_size,
-                shuffle=False,
-                num_workers=0
+                shuffle=False
             )
             
-            # Build model configuration
-            model_config = {
-                'model': {
-                    'hidden_sizes': hidden_sizes,
-                    'dropout': dropout,
-                    'activation': activation,
-                    'batch_norm': batch_norm,
-                    'weight_init': weight_init,
-                    'l1_ratio': l1_ratio,
-                    'alpha': alpha
-                }
-            }
+            logger.info(f"    Train batches: {len(train_loader)}")
+            logger.info(f"    Val batches: {len(val_loader)}")
             
-            # Create model
+            # Create model for this fold
             model = ElasticDeepSurv(
                 n_features=n_features,
                 hidden_sizes=hidden_sizes,
@@ -388,80 +322,88 @@ class LeakageFreeHyperparameterTuner:
             )
             
             # Create trainer
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             trainer = ElasticDeepSurvTrainer(
                 model=model,
                 learning_rate=learning_rate,
-                device=device
+                weight_decay=0.0,
+                device=self.device
             )
             
-            # Training configuration
-            n_epochs = 100
-            patience = 20
-            best_c_index = 0.0
-            patience_counter = 0
-            
-            # Train model
+            # Train with early stopping
             try:
-                for epoch in range(n_epochs):
-                    # Train epoch
-                    train_loss, train_cox, train_penalty = trainer.train_epoch(train_loader)
-                    
-                    # Validate
-                    val_loss, val_c_index, val_cox, val_penalty = trainer.evaluate(val_loader)
-                    
-                    # Early stopping
-                    if val_c_index > best_c_index:
-                        best_c_index = val_c_index
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                    
-                    if patience_counter >= patience:
-                        logger.info(f"    Early stopping at epoch {epoch+1}")
-                        break
+                history = trainer.fit(
+                    train_loader=train_loader,
+                    valid_loader=val_loader,
+                    n_epochs=100,
+                    early_stopping_patience=15,
+                    verbose=False
+                )
                 
-                cv_scores.append(best_c_index)
-                logger.info(f"    Fold C-index: {best_c_index:.4f}")
+                best_cindex = max(history['valid_c_index'])
+                cv_scores.append(best_cindex)
+                
+                logger.info(f"    Best C-index: {best_cindex:.4f}")
                 
             except Exception as e:
-                logger.error(f"    Trial failed: {str(e)}")
-                return 0.0  # Return poor score for failed trials
+                logger.warning(f"    Fold {fold+1} failed: {e}")
+                cv_scores.append(0.5)
+                continue
             
-            # Report intermediate value to Optuna pruner
+            # Report for pruning
             trial.report(np.mean(cv_scores), fold)
-            
-            # Prune if needed
             if trial.should_prune():
+                logger.info(f"  Trial pruned at fold {fold+1}")
                 raise optuna.TrialPruned()
         
-        mean_c_index = np.mean(cv_scores)
-        logger.info(f"\n  Trial {trial.number} completed: "
-                   f"Mean C-index = {mean_c_index:.4f} ± {np.std(cv_scores):.4f}")
+        mean_cindex = np.mean(cv_scores)
+        std_cindex = np.std(cv_scores)
         
-        return mean_c_index
+        try:
+            sparsity_info = model.get_sparsity_info()
+            sparsity_ratio = sparsity_info['sparsity_ratio']
+            
+            # Log sparsity for monitoring
+            logger.info(f"  Sparsity: {sparsity_ratio:.1%}")
+            
+            # Penalize if sparsity is too low
+            # We want at least 5% of genes eliminated (sparsity > 0.05)
+            MIN_SPARSITY = 0.05  # 5% threshold
+            
+            if sparsity_ratio < MIN_SPARSITY:
+                # Penalty proportional to how far below threshold
+                sparsity_penalty = 0.1 * (MIN_SPARSITY - sparsity_ratio)
+                logger.info(f"  Sparsity penalty: {sparsity_penalty:.4f} (sparsity below {MIN_SPARSITY:.1%})")
+            else:
+                sparsity_penalty = 0.0
+                logger.info(f"  No sparsity penalty (sparsity above threshold)")
+            
+            # Combined objective: C-index minus penalty
+            objective_value = mean_cindex - sparsity_penalty
+            
+            logger.info(f"\nTrial {trial.number}: C-index={mean_cindex:.4f} ± {std_cindex:.4f}, "
+                        f"Sparsity={sparsity_ratio:.1%}, "
+                        f"Objective={objective_value:.4f}")
+            
+            return objective_value
+            
+        except Exception as e:
+            logger.warning(f"  Could not compute sparsity: {e}")
+        logger.info(f"\nTrial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
+        
+        return mean_cindex
     
     def optimize(self, n_trials: int = 50, study_name: str = None):
-        """
-        Run hyperparameter optimization.
-        
-        Args:
-            n_trials: Number of Optuna trials
-            study_name: Name for the study
-            
-        Returns:
-            best_params, study
-        """
+        """Run optimization."""
         if study_name is None:
-            study_name = f"elastic_deepsurv_{self.cohort_name}_v2"
+            study_name = f"elastic_deepsurv_{self.cohort_name}_FIXED"
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"STARTING HYPERPARAMETER OPTIMIZATION (V2 - GRADIENT-SAFE)")
+        logger.info(f"STARTING HYPERPARAMETER OPTIMIZATION (LEAKAGE-FREE)")
         logger.info(f"{'='*60}")
         logger.info(f"Cohort: {self.cohort_name}")
         logger.info(f"Samples: {self.n_samples}")
-        logger.info(f"Genes: {self.n_genes_raw}")
-        logger.info(f"CV strategy: {self.n_folds}-fold stratified")
+        logger.info(f"Raw genes: {self.n_genes_raw}")
+        logger.info(f"CV strategy: {self.n_folds}-fold stratified (proper preprocessing)")
         logger.info(f"Trials: {n_trials}")
         logger.info(f"{'='*60}\n")
         
@@ -493,22 +435,21 @@ class LeakageFreeHyperparameterTuner:
         return study.best_params, study
 
 
-def run_tuning(
+def run_leakage_free_tuning(
     cohort: str = 'tcga',
     n_trials: int = 50,
     output_dir: str = None
 ):
     """
-    Run hyperparameter tuning with proper CV preprocessing and gradient fixes.
+    Run hyperparameter tuning with proper CV preprocessing.
     
     Args:
         cohort: 'tcga' or 'orien'
         n_trials: Number of Optuna trials
         output_dir: Where to save results
     """
-    # Load configuration
-    with open('config/default_config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+    import yaml
+    import json
     
     # Create output directory
     if output_dir is None:
@@ -516,78 +457,100 @@ def run_tuning(
         output_dir = f"results_v2/01_hyperparameter_tuning/{cohort}_308genes_{timestamp}"
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    logger.info(f"Output directory: {output_dir}")
+    # Load configuration
+    with open('config/default_config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
     
-    # Create tuner
+    # Load RAW data (not preprocessed!)
+    logger.info(f"Loading RAW data for {cohort}...")
+    
+    if cohort.lower() == 'tcga':
+        expr_raw = pd.read_csv("data/raw/tcga_batch_corrected_2sv.csv", index_col=0)
+        surv = pd.read_csv("data/processed/surv_tcga_harmonized.csv", index_col=0)
+    else:  # orien
+        expr_raw = pd.read_csv("data/raw/orien_batch_corrected.csv", index_col=0)
+        surv = pd.read_csv("data/processed/surv_orien_harmonized.csv", index_col=0)
+    
+    logger.info(f"Loaded: {expr_raw.shape[0]} genes × {expr_raw.shape[1]} samples")
+    
+    # ========================================================================
+    # CONSENSUS GENE FILTERING (Chapter 3)
+    # ========================================================================
+    if config['data'].get('use_consensus_genes', False):
+        consensus_file = config['data'].get('consensus_gene_file', 'data/raw/consensus_genes_308.txt')
+        logger.info("="*50)
+        logger.info(f"CONSENSUS GENE MODE ENABLED")
+        logger.info(f"Loading consensus genes from: {consensus_file}")
+        
+        try:
+            with open(consensus_file, 'r') as f:
+                consensus_genes = [line.strip() for line in f if line.strip()]
+            
+            logger.info(f"  Consensus gene list: {len(consensus_genes)} genes")
+            available_genes = [g for g in consensus_genes if g in expr_raw.index]
+            missing_genes = set(consensus_genes) - set(available_genes)
+            
+            if missing_genes:
+                logger.warning(f"  Missing {len(missing_genes)} genes from consensus list")
+            
+            expr_raw = expr_raw.loc[available_genes]
+            logger.info(f"  After consensus filter: {len(expr_raw)} genes × {expr_raw.shape[1]} samples")
+            logger.info(f"  ✓ Using Chapter 2's consensus genes for fair comparison")
+            logger.info("="*50)
+        except FileNotFoundError:
+            logger.error(f"Consensus gene file not found: {consensus_file}")
+            logger.error("Falling back to all genes")
+    else:
+        logger.info("Using all genes (use_consensus_genes=False in config)")
+    # ========================================================================
     tuner = LeakageFreeHyperparameterTuner(
+        train_expr_raw=expr_raw,
+        train_surv=surv,
         config=config,
-        cohort_name=cohort,
-        n_folds=5,
-        seed=42
+        cohort_name=cohort
     )
     
     # Run optimization
     best_params, study = tuner.optimize(n_trials=n_trials)
     
     # Save results
-    # 1. Best parameters
-    with open(Path(output_dir) / 'best_params.json', 'w') as f:
+    with open(f"{output_dir}/best_params.json", 'w') as f:
         json.dump(best_params, f, indent=2)
     
-    # 2. CV performance
-    cv_performance = {
-        'mean_c_index': study.best_value,
-        'std_c_index': np.std([t.value for t in study.trials if t.value is not None]),
-        'best_trial': study.best_trial.number,
+    study.trials_dataframe().to_csv(f"{output_dir}/trials.csv", index=False)
+    
+    # Save summary
+    summary = {
+        'cohort': cohort,
+        'n_samples': expr_raw.shape[1],
+        'n_genes_raw': expr_raw.shape[0],
+        'cv_method': '5-fold stratified with per-fold preprocessing',
+        'data_leakage': 'NONE (proper CV)',
+        'best_cv_cindex': study.best_value,
+        'best_params': best_params,
         'n_trials': len(study.trials)
     }
-    with open(Path(output_dir) / 'cv_performance.json', 'w') as f:
-        json.dump(cv_performance, f, indent=2)
     
-    # 3. All trials
-    trials_df = study.trials_dataframe()
-    trials_df.to_csv(Path(output_dir) / 'trials.csv', index=False)
-    
-    # 4. Study object
-    with open(Path(output_dir) / 'study.pkl', 'wb') as f:
-        pickle.dump(study, f)
+    with open(f"{output_dir}/summary.json", 'w') as f:
+        json.dump(summary, f, indent=2)
     
     logger.info(f"\nResults saved to: {output_dir}")
-    logger.info(f"  - best_params.json")
-    logger.info(f"  - cv_performance.json")
-    logger.info(f"  - trials.csv ({len(trials_df)} trials)")
-    logger.info(f"  - study.pkl")
+    logger.info(f"{'='*60}\n")
     
     return best_params, study
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Hyperparameter tuning with gradient-safe configurations'
-    )
-    parser.add_argument(
-        '--cohort',
-        type=str,
-        required=True,
-        choices=['tcga', 'orien'],
-        help='Cohort to tune: tcga or orien'
-    )
-    parser.add_argument(
-        '--n_trials',
-        type=int,
-        default=50,
-        help='Number of Optuna trials (default: 50)'
-    )
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default=None,
-        help='Output directory (default: auto-generated in results_v2/)'
-    )
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cohort', type=str, default='tcga', choices=['tcga', 'orien'])
+    parser.add_argument('--n_trials', type=int, default=50)
+    parser.add_argument('--output_dir', type=str, default=None)
     
     args = parser.parse_args()
     
-    run_tuning(
+    best_params, study = run_leakage_free_tuning(
         cohort=args.cohort,
         n_trials=args.n_trials,
         output_dir=args.output_dir
