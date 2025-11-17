@@ -284,8 +284,9 @@ class LeakageFreeHyperparameterTuner:
             # ============================================================
             # CREATE STRATIFIED BATCH SAMPLER (NEW - CRITICAL FIX)
             # ============================================================
-            
+            logger.info(f"    Cohort size check: {self.n_samples} samples") 
             if self.n_samples >= 500:  # ORIEN - large cohort
+                logger.info(f"    → Using StratifiedBatchSampler (large cohort)")
                 train_batch_sampler = StratifiedBatchSampler(
                     events=train_events,
                     batch_size=batch_size,
@@ -296,6 +297,7 @@ class LeakageFreeHyperparameterTuner:
                 train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
                 
             else:  # TCGA - small cohort
+                logger.info(f"    → Using simple random shuffling (small cohort)")
                 train_loader = DataLoader(
                     train_dataset,
                     batch_size=batch_size,
