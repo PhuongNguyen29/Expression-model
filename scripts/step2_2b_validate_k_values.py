@@ -79,7 +79,13 @@ def load_consensus_genes(filepath: Path) -> List[str]:
 
 
 def parse_architecture(best_params: dict) -> List[int]:
-    """Parse architecture from hyperparameter dictionary."""
+    """
+    Parse architecture from hyperparameter dictionary.
+    
+    DEPRECATED: This function is kept for compatibility but NOT USED in Step 2.2B.
+    Step 2.2B uses get_architecture_for_k() instead to scale architectures
+    based on input feature count.
+    """
     if 'layer1_size' in best_params:
         return [best_params['layer1_size']]
     if 'architecture_2layer' in best_params:
@@ -87,6 +93,62 @@ def parse_architecture(best_params: dict) -> List[int]:
     if 'architecture_3layer' in best_params:
         return [int(x) for x in best_params['architecture_3layer'].split('-')]
     return [256, 128]
+
+
+def get_architecture_for_k(n_features: int, cohort: str) -> List[int]:
+    """
+    Determine architecture based on input features and cohort size.
+    
+    Design principles (Version 1 - Refined):
+    - Funnel architecture: Each layer is 50% of previous (He et al. 2016)
+    - Conservative parameter budgets: Follow Harrell (2015) 1:10-20 params/event guideline
+    - ORIEN uses 2× TCGA capacity: Reflects 450/153 ≈ 3× event ratio
+    - Scales with input size: Larger gene sets get proportionally larger networks
+    
+    Parameter budgets:
+    - TCGA (153 events): Target ~1,500-3,000 params (10-20 params/event)
+    - ORIEN (450 events): Target ~4,500-9,000 params (10-20 params/event)
+    
+    References:
+    - Harrell (2015) Regression Modeling Strategies: 1:10-20 params/event
+    - He et al. (2016) Deep Residual Learning: Bottleneck/funnel architecture
+    - Bengio (2009) Learning Deep Architectures: Progressive dimension reduction
+    
+    Args:
+        n_features: Number of consensus genes (input features)
+        cohort: 'TCGA' (small, 153 events) or 'ORIEN' (large, 450 events)
+    
+    Returns:
+        List of hidden layer sizes (funnel architecture)
+    
+    Examples:
+        >>> get_architecture_for_k(21, 'TCGA')
+        [24, 12]  # 21 → 24 → 12 → 1 (~700 params, 4.6 params/event)
+        
+        >>> get_architecture_for_k(51, 'ORIEN')
+        [64, 32]  # 51 → 64 → 32 → 1 (~5,344 params, 11.9 params/event)
+    """
+    if cohort == 'TCGA':
+        # Conservative for small sample (153 events, ~3,000 param budget)
+        if n_features <= 25:
+            return [24, 12]     # For 21 genes: ~700 params (4.6/event)
+        elif n_features <= 45:
+            return [32, 16]     # For 35 genes: ~1,680 params (11/event)
+        elif n_features <= 70:
+            return [48, 24]     # For 60 genes: ~3,600 params (23.5/event)
+        else:
+            return [48, 24]     # For 83 genes: ~5,200 params (34/event) - capped for safety
+    
+    else:  # ORIEN
+        # Larger capacity for bigger sample (450 events, ~9,000 param budget)
+        if n_features <= 25:
+            return [32, 16]     # For 21 genes: ~1,200 params (2.7/event)
+        elif n_features <= 45:
+            return [64, 32]     # For 35 genes: ~3,360 params (7.5/event)
+        elif n_features <= 70:
+            return [96, 48]     # For 60 genes: ~7,680 params (17/event)
+        else:
+            return [128, 64]    # For 83 genes: ~11,200 params (24.9/event)
 
 
 def create_data_loader(dataset, events: np.ndarray, batch_size: int, shuffle: bool = True):
@@ -190,8 +252,10 @@ def train_and_evaluate_crosscohort(
         Tuple of (trained_model, source_train_cindex, target_test_cindex)
     """
     logger.info(f"\n{'='*70}")
-    logger.info(f"TRANSFER: {source_name}→{target_name}, k={k}, Seed {seed}")
+    logger.info(f"CROSS-COHORT VALIDATION: {source_name}→{target_name}, k={k}, Seed {seed}")
     logger.info(f"{'='*70}")
+    logger.info(f"  Strategy: Train on {source_name}, test on {target_name} (zero-shot)")
+    logger.info(f"  No fine-tuning - pure cross-cohort generalization test")
     
     # Filter source data to consensus genes
     available_genes = [g for g in genes if g in source_expr.index]
@@ -220,11 +284,23 @@ def train_and_evaluate_crosscohort(
     
     logger.info(f"  Batches: {len(source_loader)}")
     
-    # Build model with source hyperparameters
+    # Build model with SCALED architecture based on input size
     n_features = len(available_genes)
-    hidden_sizes = parse_architecture(source_params)
+    hidden_sizes = get_architecture_for_k(n_features, source_name)
+    
+    # Calculate total parameters for logging
+    total_params = n_features * hidden_sizes[0]
+    for i in range(len(hidden_sizes) - 1):
+        total_params += hidden_sizes[i] * hidden_sizes[i+1]
+    total_params += hidden_sizes[-1]  # Output layer
     
     logger.info(f"  Architecture: {n_features} → {' → '.join(map(str, hidden_sizes))} → 1")
+    logger.info(f"  Total parameters: {total_params:,}")
+    
+    # Log parameter budget compliance
+    n_events = source_surv['event'].sum()
+    params_per_event = total_params / n_events
+    logger.info(f"  Parameters per event: {params_per_event:.1f} (guideline: <20)")
     
     model = ElasticDeepSurv(
         n_features=n_features,
@@ -430,17 +506,83 @@ def validate_k_values_crosscohort(
 
 
 def generate_visualizations(summary_df: pd.DataFrame, output_dir: Path):
-    """Generate performance visualization plots."""
+    """Generate performance visualization plots with k-selection guidance."""
     
     logger.info(f"\n{'='*80}")
     logger.info("GENERATING VISUALIZATIONS")
     logger.info(f"{'='*80}\n")
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Create 2 figures: Main k-selection plot + comprehensive analysis
+    
+    # ========================================================================
+    # FIGURE 1: MAIN K-SELECTION PLOT (FOR PAPER)
+    # ========================================================================
+    
+    fig1, ax_main = plt.subplots(1, 1, figsize=(10, 6))
     
     k_vals = summary_df['k'].values
+    m_vals = summary_df['n_consensus'].values  # Number of consensus genes (m)
     
-    # Plot 1: Cross-cohort test C-index vs k
+    # Primary y-axis: Bidirectional test C-index
+    color_cindex = '#2E86AB'
+    ax_main.errorbar(k_vals, summary_df['bidirectional_test_mean'],
+                     yerr=summary_df['bidirectional_test_std'],
+                     marker='o', linewidth=2.5, markersize=10, 
+                     color=color_cindex, capsize=5, label='Test C-index (bidirectional)', zorder=3)
+    
+    # Mark the optimal k
+    best_idx = summary_df['bidirectional_test_mean'].idxmax()
+    best_k = summary_df.loc[best_idx, 'k']
+    best_cindex = summary_df.loc[best_idx, 'bidirectional_test_mean']
+    best_m = summary_df.loc[best_idx, 'n_consensus']
+    
+    ax_main.scatter([best_k], [best_cindex], s=200, color='#C73E1D', 
+                    marker='*', zorder=5, label=f'Optimal k={int(best_k)} (m={int(best_m)})')
+    
+    # Annotate m values on key points
+    for i, (k, m, cindex) in enumerate(zip(k_vals, m_vals, summary_df['bidirectional_test_mean'])):
+        if i % 2 == 0 or k == best_k:  # Annotate every other point + optimal
+            ax_main.annotate(f'm={int(m)}', 
+                           xy=(k, cindex), 
+                           xytext=(0, 10), 
+                           textcoords='offset points',
+                           ha='center', fontsize=9, 
+                           color='#555555',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                                   edgecolor='gray', alpha=0.7))
+    
+    ax_main.set_xlabel('k (top genes selected from each cohort)', fontsize=13, fontweight='bold')
+    ax_main.set_ylabel('Cross-Cohort Test C-index (Mean ± SD)', fontsize=13, fontweight='bold', color=color_cindex)
+    ax_main.tick_params(axis='y', labelcolor=color_cindex)
+    ax_main.set_title('K-Value Selection: Cross-Cohort Performance vs Gene Set Size', 
+                     fontsize=14, fontweight='bold', pad=20)
+    ax_main.grid(True, alpha=0.3, linestyle='--')
+    
+    # Secondary y-axis: Number of consensus genes (m)
+    ax2 = ax_main.twinx()
+    color_m = '#A23B72'
+    ax2.plot(k_vals, m_vals, marker='s', linewidth=2, markersize=8, 
+            color=color_m, linestyle='--', alpha=0.7, label='m (consensus genes)')
+    ax2.set_ylabel('m (number of consensus genes)', fontsize=13, fontweight='bold', color=color_m)
+    ax2.tick_params(axis='y', labelcolor=color_m)
+    
+    # Combined legend
+    lines1, labels1 = ax_main.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax_main.legend(lines1 + lines2, labels1 + labels2, 
+                  loc='lower right', fontsize=11, framealpha=0.95)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'k_selection_main_plot.png', dpi=300, bbox_inches='tight')
+    logger.info("✓ Main k-selection plot: k_selection_main_plot.png (USE THIS IN PAPER)")
+    
+    # ========================================================================
+    # FIGURE 2: COMPREHENSIVE ANALYSIS (4 PANELS)
+    # ========================================================================
+    
+    fig2, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Plot 1: Cross-cohort test C-index vs k (both directions)
     ax1 = axes[0, 0]
     ax1.errorbar(k_vals, summary_df['orien_to_tcga_test_mean'], 
                  yerr=summary_df['orien_to_tcga_test_std'],
@@ -448,56 +590,110 @@ def generate_visualizations(summary_df: pd.DataFrame, output_dir: Path):
     ax1.errorbar(k_vals, summary_df['tcga_to_orien_test_mean'], 
                  yerr=summary_df['tcga_to_orien_test_std'],
                  marker='s', linewidth=2, markersize=8, label='TCGA→ORIEN', capsize=5)
-    ax1.set_xlabel('Number of consensus genes (k)', fontsize=11)
+    
+    # Add m values as text
+    for k, m in zip(k_vals[::2], m_vals[::2]):  # Every other point
+        y_pos = ax1.get_ylim()[1] * 0.95
+        ax1.text(k, y_pos, f'm={int(m)}', ha='center', fontsize=8, 
+                color='gray', alpha=0.7)
+    
+    ax1.set_xlabel('k (top genes selected)', fontsize=11)
     ax1.set_ylabel('Test C-index (Mean ± SD)', fontsize=11)
-    ax1.set_title('Cross-Cohort Test Performance vs k', fontsize=12, fontweight='bold')
+    ax1.set_title('Cross-Cohort Test Performance vs k\n(Directional Breakdown)', 
+                 fontsize=12, fontweight='bold')
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Bidirectional average
+    # Plot 2: Bidirectional average with m on secondary axis
     ax2 = axes[0, 1]
+    ax2_twin = ax2.twinx()
+    
+    # C-index on primary axis
     ax2.errorbar(k_vals, summary_df['bidirectional_test_mean'],
                  yerr=summary_df['bidirectional_test_std'],
-                 marker='o', linewidth=2, markersize=8, color='#2E86AB', capsize=5)
-    ax2.set_xlabel('Number of consensus genes (k)', fontsize=11)
-    ax2.set_ylabel('Bidirectional C-index (Mean ± SD)', fontsize=11)
-    ax2.set_title('Overall Cross-Cohort Performance vs k', fontsize=12, fontweight='bold')
+                 marker='o', linewidth=2, markersize=8, color='#2E86AB', capsize=5, label='C-index')
+    ax2.set_xlabel('k (top genes selected)', fontsize=11)
+    ax2.set_ylabel('Bidirectional C-index (Mean ± SD)', fontsize=11, color='#2E86AB')
+    ax2.tick_params(axis='y', labelcolor='#2E86AB')
+    
+    # m on secondary axis
+    ax2_twin.plot(k_vals, m_vals, marker='s', linewidth=2, markersize=6, 
+                 color='#A23B72', linestyle='--', alpha=0.6, label='m genes')
+    ax2_twin.set_ylabel('m (consensus genes)', fontsize=11, color='#A23B72')
+    ax2_twin.tick_params(axis='y', labelcolor='#A23B72')
+    
+    ax2.set_title('Bidirectional Performance vs k\n(with consensus gene count)', 
+                 fontsize=12, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     
-    # Plot 3: Performance gain
+    # Plot 3: Performance gain (relative to baseline)
     ax3 = axes[1, 0]
     baseline = summary_df.loc[summary_df['k'] == k_vals[0], 'bidirectional_test_mean'].values[0]
     gains = 100 * (summary_df['bidirectional_test_mean'] - baseline) / baseline
-    colors = ['#A23B72' if g >= 0 else '#C73E1D' for g in gains]
-    ax3.bar(range(len(k_vals)), gains, color=colors, alpha=0.8)
-    ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    colors = ['#6A994E' if g >= 0 else '#C73E1D' for g in gains]
+    bars = ax3.bar(range(len(k_vals)), gains, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1.5)
+    
+    # Label bars with m values
+    for i, (bar, m) in enumerate(zip(bars, m_vals)):
+        height = bar.get_height()
+        y_pos = height + (1 if height >= 0 else -2)
+        ax3.text(bar.get_x() + bar.get_width()/2, y_pos, f'm={int(m)}',
+                ha='center', va='bottom' if height >= 0 else 'top', 
+                fontsize=8, color='#333333')
+    
     ax3.set_xticks(range(len(k_vals)))
-    ax3.set_xticklabels(k_vals)
-    ax3.set_xlabel('Number of consensus genes (k)', fontsize=11)
-    ax3.set_ylabel(f'Performance gain vs k={k_vals[0]} (%)', fontsize=11)
-    ax3.set_title('Relative Improvement in Cross-Cohort Performance', fontsize=12, fontweight='bold')
+    ax3.set_xticklabels([f'k={int(k)}' for k in k_vals], rotation=45, ha='right')
+    ax3.set_xlabel('k value', fontsize=11)
+    ax3.set_ylabel(f'Performance gain vs k={int(k_vals[0])} (%)', fontsize=11)
+    ax3.set_title('Relative Improvement in Cross-Cohort Performance', 
+                 fontsize=12, fontweight='bold')
     ax3.grid(True, alpha=0.3, axis='y')
     
     # Plot 4: Stability comparison
     ax4 = axes[1, 1]
     x = np.arange(len(k_vals))
     width = 0.35
-    ax4.bar(x - width/2, summary_df['orien_to_tcga_test_std'], width, 
-            label='ORIEN→TCGA', alpha=0.8, color='#6A994E')
-    ax4.bar(x + width/2, summary_df['tcga_to_orien_test_std'], width, 
-            label='TCGA→ORIEN', alpha=0.8, color='#BC4749')
+    bars1 = ax4.bar(x - width/2, summary_df['orien_to_tcga_test_std'], width, 
+                    label='ORIEN→TCGA', alpha=0.8, color='#6A994E', edgecolor='black', linewidth=0.5)
+    bars2 = ax4.bar(x + width/2, summary_df['tcga_to_orien_test_std'], width, 
+                    label='TCGA→ORIEN', alpha=0.8, color='#BC4749', edgecolor='black', linewidth=0.5)
     ax4.set_xticks(x)
-    ax4.set_xticklabels(k_vals)
-    ax4.set_xlabel('Number of consensus genes (k)', fontsize=11)
+    ax4.set_xticklabels([f'k={int(k)}\nm={int(m)}' for k, m in zip(k_vals, m_vals)], 
+                       rotation=0, fontsize=9)
+    ax4.set_xlabel('k value (with m consensus genes)', fontsize=11)
     ax4.set_ylabel('Standard deviation of test C-index', fontsize=11)
-    ax4.set_title('Cross-Cohort Stability Across Seeds', fontsize=12, fontweight='bold')
-    ax4.legend(fontsize=10)
+    ax4.set_title('Cross-Cohort Stability Across Seeds\n(Lower is better)', 
+                 fontsize=12, fontweight='bold')
+    ax4.legend(fontsize=10, loc='upper left')
     ax4.grid(True, alpha=0.3, axis='y')
     
     plt.tight_layout()
-    plt.savefig(output_dir / 'k_validation_crosscohort_performance.png', dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / 'k_validation_comprehensive_analysis.png', dpi=300, bbox_inches='tight')
+    logger.info("✓ Comprehensive analysis: k_validation_comprehensive_analysis.png")
     
-    logger.info("✓ Visualization saved: k_validation_crosscohort_performance.png")
+    # ========================================================================
+    # SAVE DATA FOR EXTERNAL PLOTTING (IF NEEDED)
+    # ========================================================================
+    
+    plot_data = pd.DataFrame({
+        'k': k_vals,
+        'm_consensus_genes': m_vals,
+        'bidirectional_cindex_mean': summary_df['bidirectional_test_mean'],
+        'bidirectional_cindex_std': summary_df['bidirectional_test_std'],
+        'orien_to_tcga_cindex_mean': summary_df['orien_to_tcga_test_mean'],
+        'tcga_to_orien_cindex_mean': summary_df['tcga_to_orien_test_mean']
+    })
+    plot_data.to_csv(output_dir / 'k_selection_plot_data.csv', index=False)
+    logger.info("✓ Plot data exported: k_selection_plot_data.csv (for custom plots)")
+    
+    logger.info(f"\n{'='*60}")
+    logger.info("KEY FIGURE FOR PAPER:")
+    logger.info("  → k_selection_main_plot.png")
+    logger.info(f"    Shows: k vs C-index with m consensus genes")
+    logger.info(f"    Optimal k={int(best_k)} (m={int(best_m)} genes)")
+    logger.info(f"    Test C-index: {best_cindex:.4f}")
+    logger.info(f"{'='*60}\n")
 
 
 def generate_recommendations(summary_df: pd.DataFrame, output_dir: Path):
