@@ -30,14 +30,6 @@ Reference:
 - Pan & Yang (2010) IEEE TKDE: Transfer learning survey
 - Your Chapter 4: Cross-cohort validation methodology
 
-Usage:
-    python step2_2b_validate_k_crosscohort.py \\
-        --gene_lists_dir results_v2/02_biomarker_discovery/ksweep_analysis/gene_lists \\
-        --tcga_params results_v2/01_hyperparameter_tuning/tcga_308genes/best_params.json \\
-        --orien_params results_v2/01_hyperparameter_tuning/orien_308genes/best_params.json \\
-        --output_dir results_v2/02_biomarker_discovery/k_validation_crosscohort \\
-        --k_values 80 90 100 110 120 130 140 150 \\
-        --seeds 42 123 456 789 1011
 """
 
 import sys
