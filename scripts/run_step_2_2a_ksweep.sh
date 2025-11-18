@@ -16,7 +16,7 @@ OUTPUT_DIR="results_v2/02_biomarker_discovery/ksweep_analysis"
 COX_GENES="data/raw/cox_consensus_genes_20.txt"
 
 # K values to test (comprehensive range)
-K_VALUES="20 30 40 50 60 70 80 90 100 120 150 200"
+K_VALUES="50 60 70 80 90 100 110 120 130 140 150 160 170 180 190 200"
 
 echo "=================================================="
 echo "STEP 2.2A: K-SWEEP ANALYSIS (FAST)"
@@ -36,7 +36,7 @@ echo "Starting analysis..."
 echo ""
 
 # Run k-sweep
-python step2_2a_ksweep_from_aggregated.py \
+python scripts/step2_2a_ksweep_from_aggregated.py \
     --importance_file ${IMPORTANCE_FILE} \
     --output_dir ${OUTPUT_DIR} \
     --k_values ${K_VALUES} \
