@@ -340,7 +340,7 @@ def generate_recommendations(summary_df: pd.DataFrame, output_dir: Path):
         print(f"✓ Found {len(candidates)} k values in target range:\n")
         
         for _, row in candidates.iterrows():
-            print(f"  k={row['k']:3d}: {row['n_consensus']:2.0f} consensus genes, "
+            print(f"  k={int(row['k']):3d}: {int(row['n_consensus']):2d} consensus genes, "
                   f"{row['overlap_pct']:5.1f}% overlap, Jaccard={row['jaccard_index']:.3f}")
         
         # Recommend highest stability
@@ -390,7 +390,7 @@ def generate_recommendations(summary_df: pd.DataFrame, output_dir: Path):
         closest = summary_df.iloc[(summary_df['n_consensus'] - 25).abs().argsort()[:3]]
         print(f"\n   Closest options:")
         for _, row in closest.iterrows():
-            print(f"     k={row['k']:3d}: {row['n_consensus']:2.0f} consensus genes")
+            print(f"     k={int(row['k']):3d}: {int(row['n_consensus']):2d} consensus genes")
 
 
 # ============================================================================
