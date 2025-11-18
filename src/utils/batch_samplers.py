@@ -37,14 +37,6 @@ class StratifiedBatchSampler(Sampler):
         min_events_per_batch: Minimum events per batch (default: 1)
         shuffle: Whether to shuffle order (default: True)
         drop_last: Whether to drop last incomplete batch (default: False)
-        
-    Example:
-        >>> events = torch.tensor([1, 0, 1, 0, 1, 0, 0, 1])  # 4 events, 4 censored
-        >>> sampler = StratifiedBatchSampler(events, batch_size=4, min_events_per_batch=1)
-        >>> for batch_indices in sampler:
-        ...     print(batch_indices)
-        [0, 2, 1, 3]  # Contains 2 events
-        [4, 7, 5, 6]  # Contains 2 events
     """
     
     def __init__(
