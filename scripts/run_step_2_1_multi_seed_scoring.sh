@@ -1,0 +1,10 @@
+#!/bin/bash
+export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+python extract_biomarkers_from_best_params.py \
+  --tcga-params results_v2/01_hyperparameter_tuning/tcga_308genes/best_params.json \
+  --orien-params results_v2/01_hyperparameter_tuning/orien_308genes/best_params.json \
+  --consensus-genes data/processed/consensus_genes_308.txt \
+  --output-dir results_v2/02_biomarker_discovery \
+  --max-epochs 150 \
+  --seeds 42 123 456 789 1011
