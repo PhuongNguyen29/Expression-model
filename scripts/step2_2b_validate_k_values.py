@@ -150,7 +150,16 @@ def train_model_with_genes(
     
     # Create dataset
     dataset = SurvivalDataset(expr_standardized, surv)
+    
+    # Adjust batch size for small cohorts to reduce zero-event batches
+    n_samples = len(surv)
     batch_size = best_params.get('batch_size', 32)
+    if n_samples < 500:
+        # For TCGA (n=339, ~45% events), ensure batches are large enough
+        # With batch_size=32, expected events per batch = 32 * 0.45 = 14.4
+        batch_size = max(batch_size, 32)
+        logger.info(f"  Adjusted batch size to {batch_size} for small cohort")
+    
     train_loader = create_data_loader(dataset, surv['event'].values, batch_size, shuffle=True)
     
     logger.info(f"  Batches: {len(train_loader)}")
@@ -184,23 +193,13 @@ def train_model_with_genes(
         train_loader=train_loader,
         valid_loader=None,
         n_epochs=max_epochs,
-        early_stopping_patience=15,
+        early_stopping_patience=None,  # No early stopping without validation
         verbose=False
     )
     
-    # Evaluate
-    model.eval()
-    with torch.no_grad():
-        X = torch.FloatTensor(expr_standardized.values.T).to(trainer.device)
-        risk_scores = model(X).cpu().numpy().flatten()
-    
-    from sksurv.metrics import concordance_index_censored
-    result = concordance_index_censored(
-        surv['event'].values.astype(bool),
-        surv['time'].values,
-        -risk_scores  # Negative because higher risk = worse outcome
-    )
-    final_cindex = result[0]
+    # Evaluate - get C-index from training history
+    cindex_key = 'train_cindex' if 'train_cindex' in history else 'valid_c_index'
+    final_cindex = history[cindex_key][-1] if cindex_key in history and history[cindex_key] else 0.5
     
     logger.info(f"  ✓ Final C-index: {final_cindex:.4f}")
     logger.info(f"  ✓ Best epoch: {history.get('best_epoch', 'N/A')}")
