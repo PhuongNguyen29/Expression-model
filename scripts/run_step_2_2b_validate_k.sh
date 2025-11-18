@@ -54,7 +54,7 @@ echo "Starting cross-cohort validation..."
 echo ""
 
 # Run validation
-python step2_2b_validate_k_crosscohort.py \
+python scripts/step2_2b_validate_k_crosscohort.py \
     --gene_lists_dir ${GENE_LISTS_DIR} \
     --tcga_params ${TCGA_PARAMS} \
     --orien_params ${ORIEN_PARAMS} \
