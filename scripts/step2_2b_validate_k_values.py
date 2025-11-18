@@ -180,11 +180,11 @@ def train_model_with_genes(
     )
     
     logger.info("  Training...")
-    history = trainer.train(
+    history = trainer.fit(
         train_loader=train_loader,
         valid_loader=None,
-        epochs=max_epochs,
-        patience=15,
+        n_epochs=max_epochs,
+        early_stopping_patience=15,
         verbose=False
     )
     
@@ -203,7 +203,7 @@ def train_model_with_genes(
     final_cindex = result[0]
     
     logger.info(f"  ✓ Final C-index: {final_cindex:.4f}")
-    logger.info(f"  ✓ Best epoch: {history['best_epoch']}")
+    logger.info(f"  ✓ Best epoch: {history.get('best_epoch', 'N/A')}")
     
     return model, final_cindex
 
