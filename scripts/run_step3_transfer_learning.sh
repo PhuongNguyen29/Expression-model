@@ -188,7 +188,7 @@ run_step_3_4() {
         exit 1
     fi
     
-    python step3_4_statistical_analysis.py
+    python scripts/step3_4_statistical_analysis.py
     
     if [ $? -eq 0 ]; then
         print_success "Step 3.4 completed successfully"
