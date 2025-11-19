@@ -206,8 +206,8 @@ def get_finetune_config(direction, source_params_file, target_params_file):
         source_lr = source_params['learning_rate']  # TCGA's LR
         target_batch_size = target_params['batch_size']  # ORIEN's batch size
     
-    # Fine-tuning LR = 0.1 × source LR
-    finetune_lr = source_lr * 0.1
+    # Fine-tuning LR = 0.2 × source LR
+    finetune_lr = source_lr * 0.2
     
     return target_cohort, finetune_lr, target_batch_size
 
@@ -357,7 +357,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     training_history = []
     best_train_cindex = 0.0
     
-    for epoch in range(40):
+    for epoch in range(80):
         train_loss = train_epoch(model, train_loader, optimizer, device)
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
