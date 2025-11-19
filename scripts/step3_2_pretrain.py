@@ -34,7 +34,8 @@ from torch.utils.data import DataLoader, Subset
 from lifelines.utils import concordance_index
 import matplotlib.pyplot as plt
 # Add project root to path
-sys.path.append(str(Path(__file__).parent))
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.data.dataset import SurvivalDataset
