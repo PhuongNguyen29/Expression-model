@@ -187,7 +187,7 @@ def create_comparison_table(stats_orien_to_tcga, stats_tcga_to_orien,
         'Method': 'Target-only',
         'C-index': stats_orien_to_tcga['baseline2_mean'],
         'Std': stats_orien_to_tcga['baseline2_std'],
-        'vs_Zeroshot': f"+{((stats_orien_to_tcga['baseline2_mean'] - zeroshot_results.get('orien_to_tcga_mean', 0.6256)) / zeroshot_results.get('orien_to_tcga_mean', 0.6256') * 100):.1f}%",
+        'vs_Zeroshot': f"+{((stats_orien_to_tcga['baseline2_mean'] - zeroshot_results.get('orien_to_tcga_mean', 0.6256)) / zeroshot_results.get('orien_to_tcga_mean', 0.6256) * 100):.1f}%",
         'vs_TargetOnly': '—',
         'P-value': '—'
     })
