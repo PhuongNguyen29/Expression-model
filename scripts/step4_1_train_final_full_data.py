@@ -114,8 +114,8 @@ def load_data(consensus_genes):
     orien_expr_std = orien_expr.subtract(orien_expr.mean(axis=1), axis=0).divide(orien_expr.std(axis=1), axis=0)
     
     # Transpose to samples × genes (keep as DataFrames)
-    tcga_X = tcga_expr_std.T
-    orien_X = orien_expr_std.T
+    tcga_X = tcga_expr_std
+    orien_X = orien_expr_std
     
     logger.info(f"  Final TCGA: {tcga_X.shape[0]} samples × {tcga_X.shape[1]} genes")
     logger.info(f"  Final ORIEN: {orien_X.shape[0]} samples × {orien_X.shape[1]} genes")
