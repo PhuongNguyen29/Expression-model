@@ -318,7 +318,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     checkpoint = torch.load(pretrain_model_path, map_location=device)
     
     model_config = checkpoint['config']
-    logger.info(f"Pre-trained model architecture: {model_config['layer_sizes']}")
+    logger.info(f"Pre-trained model architecture: {model_config['hidden_sizes']}")
     logger.info(f"Pre-trained model C-index: {checkpoint['best_valid_cindex']:.4f}")
     
     # Initialize model with pre-trained weights
@@ -403,7 +403,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         'n_test': len(test_idx),
         'n_train_events': int(train_events.sum()),
         'n_test_events': int(dataset.y_event[test_idx].sum()),
-        'architecture': model_config['layer_sizes'],
+        'architecture': model_config['hidden_sizes'],
         'hyperparameters': {
             'finetune_lr': finetune_lr,
             'batch_size': target_batch_size,

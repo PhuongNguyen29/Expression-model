@@ -214,7 +214,7 @@ def get_pretrain_config(direction, source_params_file, n_features=51):
     
     config = {
         'n_features': n_features,
-        'layer_sizes': architecture,
+        'hidden_sizes': architecture,
         'dropout': source_params['dropout'],
         'activation': source_params['activation'],
         'batch_norm': source_params['batch_norm'],
@@ -326,7 +326,7 @@ def pretrain_model(direction, source_expr, source_surv, source_params_file,
         n_features=len(dataset.gene_names)
     )
     
-    logger.info(f"Model architecture: {config['layer_sizes']}")
+    logger.info(f"Model architecture: {config['hidden_sizes']}")
     logger.info(f"Hyperparameters from SOURCE cohort:")
     logger.info(f"  Learning rate: {learning_rate:.6f}")
     logger.info(f"  Batch size: {batch_size}")
@@ -442,7 +442,7 @@ def pretrain_model(direction, source_expr, source_surv, source_params_file,
         'n_valid': len(valid_idx),
         'n_train_events': int(train_events.sum()),
         'n_valid_events': int(dataset.y_event[valid_idx].sum()),
-        'architecture': config['layer_sizes'],
+        'architecture': config['hidden_sizes'],
         'hyperparameters': {
             'learning_rate': learning_rate,
             'batch_size': batch_size,
