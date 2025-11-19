@@ -244,7 +244,7 @@ def train_cox_model(X_train, y_time, y_event, alpha=0.001, l1_ratio=0.5):
 def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     """
     Train neural network survival model
-    X_train: DataFrame (samples × genes)
+    X_train: DataFrame (genes × samples)
     """
     from torch.utils.data import DataLoader
     
@@ -252,20 +252,20 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     if not isinstance(X_train, pd.DataFrame):
         raise TypeError(f"Expected DataFrame, got {type(X_train)}")
     
-    # Create survival DataFrame
+    # Create survival DataFrame with sample IDs from columns
     surv_df = pd.DataFrame({
         'time': y_time,
         'event': y_event
-    }, index=X_train.index)
+    }, index=X_train.columns)  # ← CHANGE .index to .columns
     
-    logger.info(f"  Dataset: {X_train.shape[0]} samples × {X_train.shape[1]} features")
+    logger.info(f"  Dataset: {X_train.shape[1]} samples × {X_train.shape[0]} features")  # ← SWAP
     logger.info(f"  Events: {surv_df['event'].sum()}/{len(surv_df)} ({100*surv_df['event'].mean():.1f}%)")
     
     # Create dataset
     dataset = SurvivalDataset(X_train, surv_df)
     
     # Create model
-    n_features = X_train.shape[1]
+    n_features = X_train.shape[0]  # ← CHANGE shape[1] to shape[0] (number of genes)
     model = ElasticDeepSurv(
         n_features=n_features,
         hidden_sizes=config['hidden_sizes'],
