@@ -84,58 +84,57 @@ def load_data(consensus_genes):
     
     # Filter to consensus genes
     logger.info(f"Filtering to {len(consensus_genes)} consensus genes...")
-    tcga_expr_filtered = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
-    orien_expr_filtered = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
+    tcga_expr = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
+    orien_expr = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
     
-    logger.info(f"  TCGA: {tcga_expr_filtered.shape[1]} samples × {tcga_expr_filtered.shape[0]} genes")
-    logger.info(f"  ORIEN: {orien_expr_filtered.shape[1]} samples × {orien_expr_filtered.shape[0]} genes")
+    logger.info(f"  TCGA: {tcga_expr.shape[1]} samples × {tcga_expr.shape[0]} genes")
+    logger.info(f"  ORIEN: {orien_expr.shape[1]} samples × {orien_expr.shape[0]} genes")
     
     # Match samples between expression and survival data
-    tcga_expr_samples = set(tcga_expr_filtered.columns)
-    tcga_surv_samples = set(tcga_surv['sampleID'])
-    tcga_matched = sorted(list(tcga_expr_samples.intersection(tcga_surv_samples)))
+    def match_samples(expr_df, surv_df, cohort_name):
+        """Match samples between expression and survival data"""
+        expr_samples = set(expr_df.columns)
+        surv_samples = set(surv_df['sampleID'])
+        matched = sorted(list(expr_samples.intersection(surv_samples)))
+        
+        logger.info(f"  {cohort_name}: {len(matched)}/{len(surv_samples)} samples matched")
+        
+        expr_df = expr_df[matched]
+        surv_df = surv_df[surv_df['sampleID'].isin(matched)].set_index('sampleID')
+        
+        return expr_df, surv_df
     
-    orien_expr_samples = set(orien_expr_filtered.columns)
-    orien_surv_samples = set(orien_surv['sampleID'])
-    orien_matched = sorted(list(orien_expr_samples.intersection(orien_surv_samples)))
+    # Match samples
+    tcga_expr, tcga_surv = match_samples(tcga_expr, tcga_surv, 'TCGA')
+    orien_expr, orien_surv = match_samples(orien_expr, orien_surv, 'ORIEN')
     
-    logger.info(f"  TCGA: {len(tcga_matched)}/{len(tcga_surv_samples)} samples matched")
-    logger.info(f"  ORIEN: {len(orien_matched)}/{len(orien_surv_samples)} samples matched")
-    
-    # Filter to matched samples
-    tcga_expr_filtered = tcga_expr_filtered[tcga_matched]
-    orien_expr_filtered = orien_expr_filtered[orien_matched]
-    
-    tcga_surv = tcga_surv[tcga_surv['sampleID'].isin(tcga_matched)].set_index('sampleID').loc[tcga_matched]
-    orien_surv = orien_surv[orien_surv['sampleID'].isin(orien_matched)].set_index('sampleID').loc[orien_matched]
-    
-    # Standardize features (Z-score normalization per gene)
+    # Standardize (Z-score per gene)
     logger.info("Standardizing expression data...")
-    tcga_expr_std = tcga_expr_filtered.subtract(
-        tcga_expr_filtered.mean(axis=1), axis=0
-    ).divide(tcga_expr_filtered.std(axis=1), axis=0)
+    tcga_expr_std = tcga_expr.subtract(tcga_expr.mean(axis=1), axis=0).divide(tcga_expr.std(axis=1), axis=0)
+    orien_expr_std = orien_expr.subtract(orien_expr.mean(axis=1), axis=0).divide(orien_expr.std(axis=1), axis=0)
     
-    orien_expr_std = orien_expr_filtered.subtract(
-        orien_expr_filtered.mean(axis=1), axis=0
-    ).divide(orien_expr_filtered.std(axis=1), axis=0)
+    # Transpose to samples × genes (keep as DataFrames)
+    tcga_X = tcga_expr_std.T
+    orien_X = orien_expr_std.T
     
-    # Transpose to samples × genes
-    tcga_X = tcga_expr_std.T.values.astype(np.float32)
-    orien_X = orien_expr_std.T.values.astype(np.float32)
+    logger.info(f"  Final TCGA: {tcga_X.shape[0]} samples × {tcga_X.shape[1]} genes")
+    logger.info(f"  Final ORIEN: {orien_X.shape[0]} samples × {orien_X.shape[1]} genes")
     
     # Prepare data dictionaries
     tcga_data = {
-        'X': tcga_X,
+        'X': tcga_X,  # DataFrame
         'y_time': tcga_surv['time'].values.astype(np.float32),
         'y_event': tcga_surv['event'].values.astype(np.int32),
-        'sample_ids': tcga_matched
+        'sample_ids': tcga_X.index.tolist(),
+        'surv_df': tcga_surv[['time', 'event']]
     }
     
     orien_data = {
-        'X': orien_X,
+        'X': orien_X,  # DataFrame
         'y_time': orien_surv['time'].values.astype(np.float32),
         'y_event': orien_surv['event'].values.astype(np.int32),
-        'sample_ids': orien_matched
+        'sample_ids': orien_X.index.tolist(),
+        'surv_df': orien_surv[['time', 'event']]
     }
     
     return tcga_data, orien_data
@@ -234,40 +233,30 @@ def train_cox_model(X_train, y_time, y_event, alpha=0.001, l1_ratio=0.5):
 def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     """
     Train neural network survival model
+    X_train: DataFrame (samples × genes)
     """
     from torch.utils.data import DataLoader
     
-    # Convert numpy arrays to DataFrames for SurvivalDataset
-    if isinstance(X_train, np.ndarray):
-        # Create DataFrame with dummy sample IDs
-        sample_ids = [f"sample_{i}" for i in range(len(X_train))]
-        X_train_df = pd.DataFrame(
-            X_train, 
-            index=sample_ids,
-            columns=[f"gene_{i}" for i in range(X_train.shape[1])]
-        )
-        
-        surv_df = pd.DataFrame({
-            'time': y_time,
-            'event': y_event
-        }, index=sample_ids)
-    else:
-        X_train_df = X_train
-        surv_df = pd.DataFrame({
-            'time': y_time,
-            'event': y_event
-        }, index=X_train.index)
+    # X_train should already be a DataFrame
+    if not isinstance(X_train, pd.DataFrame):
+        raise TypeError(f"Expected DataFrame, got {type(X_train)}")
     
-    logger.info(f"  Dataset size: {X_train_df.shape}")
+    # Create survival DataFrame
+    surv_df = pd.DataFrame({
+        'time': y_time,
+        'event': y_event
+    }, index=X_train.index)
+    
+    logger.info(f"  Dataset: {X_train.shape[0]} samples × {X_train.shape[1]} features")
     logger.info(f"  Events: {surv_df['event'].sum()}/{len(surv_df)} ({100*surv_df['event'].mean():.1f}%)")
     
     # Create dataset
-    dataset = SurvivalDataset(X_train_df, surv_df)
+    dataset = SurvivalDataset(X_train, surv_df)
     
     # Create model
-    n_features = X_train_df.shape[1]  # Number of genes
+    n_features = X_train.shape[1]
     model = ElasticDeepSurv(
-        n_features=n_features,  # CORRECTED: was input_dim
+        n_features=n_features,
         hidden_sizes=config['hidden_sizes'],
         dropout=config['dropout'],
         batch_norm=config['batch_norm'],
@@ -279,7 +268,7 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # DataLoader
-    if len(X_train_df) > 500:
+    if len(X_train) > 500:
         from src.utils.batch_samplers import StratifiedBatchSampler
         sampler = StratifiedBatchSampler(
             dataset.y_event, 
@@ -287,17 +276,12 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
             min_events_per_batch=2
         )
         loader = DataLoader(dataset, batch_sampler=sampler)
-        logger.info(f"  Using StratifiedBatchSampler")
     else:
         loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
-        logger.info(f"  Using simple random shuffle")
     
     # Training loop
     model.train()
     for epoch in range(config['epochs']):
-        epoch_loss = 0
-        n_batches = 0
-        
         for batch_x, batch_time, batch_event in loader:
             batch_x = batch_x.to(device)
             batch_time = batch_time.to(device)
@@ -310,13 +294,10 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
             if loss is not None and torch.isfinite(loss):
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
-                n_batches += 1
         
-        # Log progress every 50 epochs
+        # Log every 50 epochs
         if (epoch + 1) % 50 == 0:
-            avg_loss = epoch_loss / max(n_batches, 1)
-            logger.info(f"    Epoch {epoch+1}/{config['epochs']}: Loss={avg_loss:.4f}")
+            logger.info(f"    Epoch {epoch+1}/{config['epochs']}")
     
     return model
 
