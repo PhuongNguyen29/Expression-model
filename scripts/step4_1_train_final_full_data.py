@@ -258,13 +258,16 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
             'event': y_event
         }, index=X_train.index)
     
+    logger.info(f"  Dataset size: {X_train_df.shape}")
+    logger.info(f"  Events: {surv_df['event'].sum()}/{len(surv_df)} ({100*surv_df['event'].mean():.1f}%)")
+    
     # Create dataset
     dataset = SurvivalDataset(X_train_df, surv_df)
     
     # Create model
-    input_dim = X_train_df.shape[1]
+    n_features = X_train_df.shape[1]  # Number of genes
     model = ElasticDeepSurv(
-        input_dim=input_dim,
+        n_features=n_features,  # CORRECTED: was input_dim
         hidden_sizes=config['hidden_sizes'],
         dropout=config['dropout'],
         batch_norm=config['batch_norm'],
@@ -279,15 +282,22 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     if len(X_train_df) > 500:
         from src.utils.batch_samplers import StratifiedBatchSampler
         sampler = StratifiedBatchSampler(
-            y_event, batch_size=config['batch_size'], min_events_per_batch=2
+            dataset.y_event, 
+            batch_size=config['batch_size'], 
+            min_events_per_batch=2
         )
         loader = DataLoader(dataset, batch_sampler=sampler)
+        logger.info(f"  Using StratifiedBatchSampler")
     else:
         loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+        logger.info(f"  Using simple random shuffle")
     
     # Training loop
     model.train()
     for epoch in range(config['epochs']):
+        epoch_loss = 0
+        n_batches = 0
+        
         for batch_x, batch_time, batch_event in loader:
             batch_x = batch_x.to(device)
             batch_time = batch_time.to(device)
@@ -300,6 +310,13 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
             if loss is not None and torch.isfinite(loss):
                 loss.backward()
                 optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
+        
+        # Log progress every 50 epochs
+        if (epoch + 1) % 50 == 0:
+            avg_loss = epoch_loss / max(n_batches, 1)
+            logger.info(f"    Epoch {epoch+1}/{config['epochs']}: Loss={avg_loss:.4f}")
     
     return model
 
