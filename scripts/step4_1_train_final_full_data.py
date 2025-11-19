@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.utils import resample
-from sksurv.metrics import concordance_index_censored
+from lifelines.utils import concordance_index
 from lifelines import CoxPHFitter
 from lifelines.utils import concordance_index
 
@@ -69,15 +69,13 @@ ORIEN_CONFIG = {
 # ============================================================
 # Helper Functions
 # ============================================================
-
 def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
     """
-    Calculate bootstrap-corrected C-index
+    Calculate bootstrap-corrected C-index using lifelines
     """
     # Apparent C-index (optimistic)
-    apparent_cindex = concordance_index_censored(
-        y_event.astype(bool), y_time, risk_scores
-    )[0]
+    apparent_cindex = concordance_index(y_time, -risk_scores, y_event)
+    # Note: negative risk scores because lifelines expects higher values = better survival
     
     n_samples = len(risk_scores)
     optimism_scores = []
@@ -88,25 +86,32 @@ def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
         if (i + 1) % 200 == 0:
             logger.info(f"    Bootstrap iteration {i+1}/{n_bootstrap}")
         
-        # Resample with replacement
-        boot_indices = resample(range(n_samples), replace=True, random_state=i)
+        # Resample with replacement - returns array, not None
+        boot_indices_array = resample(
+            np.arange(n_samples), 
+            replace=True, 
+            random_state=i,
+            n_samples=n_samples  # Explicit number of samples
+        )
+        boot_indices = boot_indices_array.tolist()
         
         # In-sample C-index
-        c_boot_in = concordance_index_censored(
-            y_event[boot_indices].astype(bool),
+        c_boot_in = concordance_index(
             y_time[boot_indices],
-            risk_scores[boot_indices]
-        )[0]
+            -risk_scores[boot_indices],
+            y_event[boot_indices]
+        )
         
-        # Out-of-bag indices
-        oob_indices = np.array([j for j in range(n_samples) if j not in boot_indices])
+        # Out-of-bag indices (using set for faster lookup)
+        boot_indices_set = set(boot_indices)
+        oob_indices = np.array([j for j in range(n_samples) if j not in boot_indices_set])
         
         if len(oob_indices) > 10:  # Need enough OOB samples
-            c_boot_out = concordance_index_censored(
-                y_event[oob_indices].astype(bool),
+            c_boot_out = concordance_index(
                 y_time[oob_indices],
-                risk_scores[oob_indices]
-            )[0]
+                -risk_scores[oob_indices],
+                y_event[oob_indices]
+            )
             
             # Optimism = in-sample - out-of-sample
             optimism_scores.append(c_boot_in - c_boot_out)
