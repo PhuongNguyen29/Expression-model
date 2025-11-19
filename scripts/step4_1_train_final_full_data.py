@@ -38,7 +38,7 @@ from utils.survival_models import ElasticDeepSurv
 # Configuration
 # ============================================================
 
-CONSENSUS_GENES_FILE = 'results_v2/01_feature_selection/consensus_genes_k120.txt'
+CONSENSUS_GENES_FILE = 'results_v2/02_biomarker_discovery/ksweep_analysis/consensus_genes_k120.txt'
 OUTPUT_DIR = Path('results_v2/04_final_models')
 SEEDS = [42, 123, 456, 789, 1011]
 N_BOOTSTRAP = 1000
