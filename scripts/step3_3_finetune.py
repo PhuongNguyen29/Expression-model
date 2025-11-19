@@ -29,7 +29,7 @@ import torch.nn as nn
 from pathlib import Path
 from datetime import datetime
 from torch.utils.data import DataLoader, Subset
-from sksurv.metrics import concordance_index_censored
+from lifelines.utils import concordance_index
 import matplotlib.pyplot as plt
 # Add project root to path
 sys.path.append(str(Path(__file__).parent))
@@ -260,7 +260,7 @@ def evaluate(model, dataset, indices, device):
     times = np.concatenate(all_times)
     events = np.concatenate(all_events).astype(bool)
     
-    c_index = concordance_index_censored(events, times, risks)[0]
+    c_index = concordance_index(times, -risks, events)
     
     return c_index
 
