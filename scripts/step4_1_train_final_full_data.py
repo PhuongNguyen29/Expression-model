@@ -117,25 +117,29 @@ def load_data(consensus_genes):
     tcga_X = tcga_expr_std
     orien_X = orien_expr_std
     
-    logger.info(f"  Final TCGA: {tcga_X.shape[0]} samples × {tcga_X.shape[1]} genes")
-    logger.info(f"  Final ORIEN: {orien_X.shape[0]} samples × {orien_X.shape[1]} genes")
-    
-    # Prepare data dictionaries
+    logger.info(f"  Final TCGA: {tcga_X.shape[1]} samples × {tcga_X.shape[0]} genes")  # ← SWAP ORDER
+    logger.info(f"  Final ORIEN: {orien_X.shape[1]} samples × {orien_X.shape[0]} genes")  # ← SWAP ORDER
+
+    # Line 124-138: FIX sample_ids
     tcga_data = {
-        'X': tcga_X,  # DataFrame
+        'X': tcga_X,  # DataFrame (genes × samples)
         'y_time': tcga_surv['time'].values.astype(np.float32),
         'y_event': tcga_surv['event'].values.astype(np.int32),
-        'sample_ids': tcga_X.index.tolist(),
+        'sample_ids': tcga_X.columns.tolist(),  # ← CHANGE .index to .columns
         'surv_df': tcga_surv[['time', 'event']]
     }
-    
+
     orien_data = {
-        'X': orien_X,  # DataFrame
+        'X': orien_X,  # DataFrame (genes × samples)
         'y_time': orien_surv['time'].values.astype(np.float32),
         'y_event': orien_surv['event'].values.astype(np.int32),
-        'sample_ids': orien_X.index.tolist(),
+        'sample_ids': orien_X.columns.tolist(),  # ← CHANGE .index to .columns
         'surv_df': orien_surv[['time', 'event']]
     }
+
+    # Line 366-367: FIX LOGGING
+    logger.info(f"  TCGA: {tcga_data['X'].shape[1]} samples, {tcga_data['X'].shape[0]} features")  # ← SWAP
+    logger.info(f"  ORIEN: {orien_data['X'].shape[1]} samples, {orien_data['X'].shape[0]} features")  # ← SWAP
     
     return tcga_data, orien_data
 
@@ -214,9 +218,16 @@ def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
 def train_cox_model(X_train, y_time, y_event, alpha=0.001, l1_ratio=0.5):
     """
     Train penalized Cox regression model
+    X_train: DataFrame (genes × samples) - will be transposed internally
     """
+    # Transpose to samples × genes for Cox model
+    if isinstance(X_train, pd.DataFrame):
+        X_samples_by_genes = X_train.T  # genes×samples → samples×genes
+    else:
+        raise TypeError(f"Expected DataFrame, got {type(X_train)}")
+    
     # Prepare data for lifelines
-    df = pd.DataFrame(X_train)
+    df = pd.DataFrame(X_samples_by_genes)
     df['time'] = y_time
     df['event'] = y_event
     
@@ -305,17 +316,28 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
 def extract_risk_scores(model, X, model_type='neural'):
     """
     Extract risk scores from trained model
+    X: DataFrame (genes × samples) for consistency
     """
     if model_type == 'cox':
-        # Cox model: use partial hazard
-        df = pd.DataFrame(X)
+        # Cox model needs samples × genes
+        if isinstance(X, pd.DataFrame):
+            X_transposed = X.T  # genes×samples → samples×genes
+        else:
+            X_transposed = X
+        df = pd.DataFrame(X_transposed)
         risk_scores = model.predict_partial_hazard(df).values
     else:
-        # Neural network
+        # Neural network needs samples × genes
+        # X is genes×samples, so transpose it
+        if isinstance(X, pd.DataFrame):
+            X_array = X.T.values  # genes×samples → samples×genes → numpy
+        else:
+            X_array = X.T if hasattr(X, 'T') else X
+        
         device = next(model.parameters()).device
         model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X).to(device)
+            X_tensor = torch.FloatTensor(X_array).to(device)
             risk_scores = model(X_tensor).cpu().numpy().flatten()
     
     return risk_scores
