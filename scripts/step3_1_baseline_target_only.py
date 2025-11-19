@@ -184,7 +184,7 @@ def get_model_config(cohort_name, params_file, n_features=51):
     if cohort_name == 'tcga':
         config = {
             'n_features': n_features,
-            'layers': [48, 24],
+            'layer_sizes': [48, 24],
             'dropout': params['dropout'],
             'activation': params['activation'],
             'batch_norm': params['batch_norm'],
@@ -198,7 +198,7 @@ def get_model_config(cohort_name, params_file, n_features=51):
     else:  # orien
         config = {
             'n_features': n_features,
-            'layers': [96, 48],
+            'layer_sizes': [96, 48],
             'dropout': params['dropout'],
             'activation': params['activation'],
             'batch_norm': params['batch_norm'],
@@ -304,7 +304,7 @@ def train_baseline_model(cohort_name, expr_df, surv_df, params_file, seed,
         n_features=len(dataset.gene_names)
     )
     
-    logger.info(f"Model config: {config['layers']}, dropout={config['dropout']}, "
+    logger.info(f"Model config: {config['layer_sizes']}, dropout={config['dropout']}, "
                 f"batch_norm={config['batch_norm']}")
     logger.info(f"Training: LR={learning_rate:.6f}, batch_size={batch_size}, epochs=40")
     
@@ -377,7 +377,7 @@ def train_baseline_model(cohort_name, expr_df, surv_df, params_file, seed,
         'n_test': len(test_idx),
         'n_train_events': int(train_events.sum()),
         'n_test_events': int(dataset.y_event[test_idx].sum()),
-        'architecture': config['layers'],
+        'architecture': config['layer_sizes'],
         'hyperparameters': {
             'learning_rate': learning_rate,
             'batch_size': batch_size,
