@@ -235,14 +235,34 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     """
     Train neural network survival model
     """
-    from src.data.dataset import SurvivalDataset
     from torch.utils.data import DataLoader
     
+    # Convert numpy arrays to DataFrames for SurvivalDataset
+    if isinstance(X_train, np.ndarray):
+        # Create DataFrame with dummy sample IDs
+        sample_ids = [f"sample_{i}" for i in range(len(X_train))]
+        X_train_df = pd.DataFrame(
+            X_train, 
+            index=sample_ids,
+            columns=[f"gene_{i}" for i in range(X_train.shape[1])]
+        )
+        
+        surv_df = pd.DataFrame({
+            'time': y_time,
+            'event': y_event
+        }, index=sample_ids)
+    else:
+        X_train_df = X_train
+        surv_df = pd.DataFrame({
+            'time': y_time,
+            'event': y_event
+        }, index=X_train.index)
+    
     # Create dataset
-    dataset = SurvivalDataset(X_train, y_time, y_event)
+    dataset = SurvivalDataset(X_train_df, surv_df)
     
     # Create model
-    input_dim = X_train.shape[1]
+    input_dim = X_train_df.shape[1]
     model = ElasticDeepSurv(
         input_dim=input_dim,
         hidden_sizes=config['hidden_sizes'],
@@ -256,7 +276,7 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
     
     # DataLoader
-    if len(X_train) > 500:
+    if len(X_train_df) > 500:
         from src.utils.batch_samplers import StratifiedBatchSampler
         sampler = StratifiedBatchSampler(
             y_event, batch_size=config['batch_size'], min_events_per_batch=2
@@ -277,7 +297,7 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
             risk_scores = model(batch_x)
             loss = model.cox_loss(risk_scores, batch_time, batch_event)
             
-            if loss is not None:
+            if loss is not None and torch.isfinite(loss):
                 loss.backward()
                 optimizer.step()
     
