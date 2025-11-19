@@ -241,7 +241,7 @@ def train_epoch(model, train_loader, optimizer, device):
         
         optimizer.zero_grad()
         risk = model(features)
-        loss = model.cox_loss(risk, time, event)
+        loss = model.compute_loss(risk, time, event)
         
         loss.backward()
         optimizer.step()
