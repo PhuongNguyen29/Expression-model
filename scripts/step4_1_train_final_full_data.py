@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from utils.data_loader import load_data
-from utils.survival_models import ElasticDeepSurv
+from src.data.data_loader import load_data
+from src.models.elastic_deepsurv import ElasticDeepSurv
+from src.data.dataset import SurvivalDataset
+from src.utils.batch_samplers import StratifiedBatchSampler
 
 # ============================================================
 # Configuration
@@ -161,7 +163,7 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     """
     Train neural network survival model
     """
-    from utils.survival_dataset import SurvivalDataset
+    from src.data.dataset import SurvivalDataset
     from torch.utils.data import DataLoader
     
     # Create dataset
@@ -183,7 +185,7 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     
     # DataLoader
     if len(X_train) > 500:
-        from utils.stratified_sampler import StratifiedBatchSampler
+        from src.utils.batch_samplers import StratifiedBatchSampler
         sampler = StratifiedBatchSampler(
             y_event, batch_size=config['batch_size'], min_events_per_batch=2
         )
