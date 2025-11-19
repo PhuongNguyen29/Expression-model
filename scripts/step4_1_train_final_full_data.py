@@ -293,10 +293,10 @@ def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
     # Training loop
     model.train()
     for epoch in range(config['epochs']):
-        for batch_x, batch_time, batch_event in loader:
-            batch_x = batch_x.to(device)
-            batch_time = batch_time.to(device)
-            batch_event = batch_event.to(device)
+        for batch in loader:
+            batch_x = batch['features'].to(device)
+            batch_time = batch['time'].to(device)
+            batch_event = batch['event'].to(device)
             
             optimizer.zero_grad()
             risk_scores = model(batch_x)
