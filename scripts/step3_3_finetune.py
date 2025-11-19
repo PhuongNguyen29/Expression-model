@@ -207,7 +207,7 @@ def get_finetune_config(direction, source_params_file, target_params_file):
         target_batch_size = target_params['batch_size']  # ORIEN's batch size
     
     # Fine-tuning LR = 0.2 × source LR
-    finetune_lr = source_lr / 5
+    finetune_lr = source_lr / 3
     
     return target_cohort, finetune_lr, target_batch_size
 
