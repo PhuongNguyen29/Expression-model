@@ -357,7 +357,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     training_history = []
     best_train_cindex = 0.0
     
-    for epoch in range(200)):
+    for epoch in range(200):
         train_loss = train_epoch(model, train_loader, optimizer, device)
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
