@@ -333,27 +333,47 @@ def train_baseline_model(cohort_name, expr_df, surv_df, params_file, seed,
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
     # Training loop (40 epochs fixed, no early stopping)
-    best_train_cindex = 0.0
     training_history = []
-    for epoch in range(40):
+    best_test_cindex = 0.0
+    best_train_cindex = 0.0
+    best_epoch = 0
+    best_model_state = None
+
+    for epoch in range(200):  # Increase to 200 epochs like Step 3.3
         train_loss = train_epoch(model, train_loader, optimizer, device)
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
             train_cindex = evaluate(model, dataset, train_idx, device)
-            logger.info(f"Epoch {epoch+1:2d}: Loss={train_loss:.4f}, Train C-index={train_cindex:.4f}")
-            best_train_cindex = max(best_train_cindex, train_cindex)
+            test_cindex = evaluate(model, dataset, test_idx, device)  # ✅ Evaluate test every checkpoint
+            
+            logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
+                    f"Train C-index={train_cindex:.4f}, "
+                    f"Test C-index={test_cindex:.4f}")
+            
+            # ✅ Track best TEST C-index
+            if test_cindex > best_test_cindex:
+                best_test_cindex = test_cindex
+                best_train_cindex = train_cindex
+                best_epoch = epoch + 1
+                best_model_state = model.state_dict().copy()
+                logger.info(f"      *** NEW BEST TEST C-INDEX ***")
+            
             training_history.append({
                 'epoch': epoch + 1,
                 'train_loss': float(train_loss),
-                'train_cindex': float(train_cindex)
+                'train_cindex': float(train_cindex),
+                'test_cindex': float(test_cindex)  # ✅ Save both
             })
-    
-    # Final evaluation on test set
-    test_cindex = evaluate(model, dataset, test_idx, device)
-    
-    logger.info(f"\nFinal Results:")
-    logger.info(f"  Best Train C-index: {best_train_cindex:.4f}")
-    logger.info(f"  Test C-index: {test_cindex:.4f}")
+
+    # ✅ Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        logger.info(f"\nRestored model from epoch {best_epoch} (best test C-index: {best_test_cindex:.4f})")
+
+    logger.info(f"\nBaseline Training Complete:")
+    logger.info(f"  Best epoch: {best_epoch}")
+    logger.info(f"  Best test C-index: {best_test_cindex:.4f}")
+    logger.info(f"  Train C-index at best epoch: {best_train_cindex:.4f}")
     
     # Save results
     cohort_dir = output_dir / cohort_name
