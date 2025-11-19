@@ -90,42 +90,52 @@ def load_data(consensus_genes):
     logger.info(f"  TCGA: {tcga_expr_filtered.shape[1]} samples × {tcga_expr_filtered.shape[0]} genes")
     logger.info(f"  ORIEN: {orien_expr_filtered.shape[1]} samples × {orien_expr_filtered.shape[0]} genes")
     
-    # Transpose (samples × genes)
-    tcga_X = tcga_expr_filtered.T
-    orien_X = orien_expr_filtered.T
+    # Match samples between expression and survival data
+    tcga_expr_samples = set(tcga_expr_filtered.columns)
+    tcga_surv_samples = set(tcga_surv['sampleID'])
+    tcga_matched = sorted(list(tcga_expr_samples.intersection(tcga_surv_samples)))
     
-    # Match samples with survival data
-    tcga_common = tcga_X.index.intersection(tcga_surv['sample'])
-    orien_common = orien_X.index.intersection(orien_surv['sample'])
+    orien_expr_samples = set(orien_expr_filtered.columns)
+    orien_surv_samples = set(orien_surv['sampleID'])
+    orien_matched = sorted(list(orien_expr_samples.intersection(orien_surv_samples)))
     
-    logger.info(f"  TCGA: {len(tcga_common)}/{len(tcga_X)} samples matched")
-    logger.info(f"  ORIEN: {len(orien_common)}/{len(orien_X)} samples matched")
+    logger.info(f"  TCGA: {len(tcga_matched)}/{len(tcga_surv_samples)} samples matched")
+    logger.info(f"  ORIEN: {len(orien_matched)}/{len(orien_surv_samples)} samples matched")
     
-    # Filter to common samples
-    tcga_X = tcga_X.loc[tcga_common]
-    orien_X = orien_X.loc[orien_common]
+    # Filter to matched samples
+    tcga_expr_filtered = tcga_expr_filtered[tcga_matched]
+    orien_expr_filtered = orien_expr_filtered[orien_matched]
     
-    tcga_surv = tcga_surv[tcga_surv['sample'].isin(tcga_common)].set_index('sample').loc[tcga_common]
-    orien_surv = orien_surv[orien_surv['sample'].isin(orien_common)].set_index('sample').loc[orien_common]
+    tcga_surv = tcga_surv[tcga_surv['sampleID'].isin(tcga_matched)].set_index('sampleID').loc[tcga_matched]
+    orien_surv = orien_surv[orien_surv['sampleID'].isin(orien_matched)].set_index('sampleID').loc[orien_matched]
     
-    # Standardize features (Z-score normalization)
+    # Standardize features (Z-score normalization per gene)
     logger.info("Standardizing expression data...")
-    tcga_X_std = (tcga_X - tcga_X.mean()) / tcga_X.std()
-    orien_X_std = (orien_X - orien_X.mean()) / orien_X.std()
+    tcga_expr_std = tcga_expr_filtered.subtract(
+        tcga_expr_filtered.mean(axis=1), axis=0
+    ).divide(tcga_expr_filtered.std(axis=1), axis=0)
+    
+    orien_expr_std = orien_expr_filtered.subtract(
+        orien_expr_filtered.mean(axis=1), axis=0
+    ).divide(orien_expr_filtered.std(axis=1), axis=0)
+    
+    # Transpose to samples × genes
+    tcga_X = tcga_expr_std.T.values.astype(np.float32)
+    orien_X = orien_expr_std.T.values.astype(np.float32)
     
     # Prepare data dictionaries
     tcga_data = {
-        'X': tcga_X_std.values.astype(np.float32),
+        'X': tcga_X,
         'y_time': tcga_surv['time'].values.astype(np.float32),
         'y_event': tcga_surv['event'].values.astype(np.int32),
-        'sample_ids': tcga_X_std.index.tolist()
+        'sample_ids': tcga_matched
     }
     
     orien_data = {
-        'X': orien_X_std.values.astype(np.float32),
+        'X': orien_X,
         'y_time': orien_surv['time'].values.astype(np.float32),
         'y_event': orien_surv['event'].values.astype(np.int32),
-        'sample_ids': orien_X_std.index.tolist()
+        'sample_ids': orien_matched
     }
     
     return tcga_data, orien_data
