@@ -31,9 +31,6 @@ logger = logging.getLogger(__name__)
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
-# ============================================================
-# Configuration
-# ============================================================
 
 INPUT_DIR = Path('results_v2/04_final_models')
 OUTPUT_DIR = Path('results_v2/04_final_models/survival_analysis')
