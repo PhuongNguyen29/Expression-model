@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.data.data_loader import load_data
 from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.data.dataset import SurvivalDataset
 from src.utils.batch_samplers import StratifiedBatchSampler
@@ -67,6 +66,69 @@ ORIEN_CONFIG = {
     'alpha': 0.000081,
     'l1_ratio': 0.5
 }
+# ============================================================
+# Data Loading Function
+# ============================================================
+
+def load_data(consensus_genes):
+    """Load and filter data to consensus genes"""
+    logger.info("Loading data files...")
+    
+    # Load expression data
+    tcga_expr = pd.read_csv("data/raw/tcga_batch_corrected_2sv.csv", index_col=0)
+    orien_expr = pd.read_csv("data/raw/orien_batch_corrected.csv", index_col=0)
+    
+    # Load survival data
+    tcga_surv = pd.read_csv("data/raw/surv_tcga.csv")
+    orien_surv = pd.read_csv("data/raw/surv_orien_update.csv")
+    
+    # Filter to consensus genes
+    logger.info(f"Filtering to {len(consensus_genes)} consensus genes...")
+    tcga_expr_filtered = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
+    orien_expr_filtered = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
+    
+    logger.info(f"  TCGA: {tcga_expr_filtered.shape[1]} samples × {tcga_expr_filtered.shape[0]} genes")
+    logger.info(f"  ORIEN: {orien_expr_filtered.shape[1]} samples × {orien_expr_filtered.shape[0]} genes")
+    
+    # Transpose (samples × genes)
+    tcga_X = tcga_expr_filtered.T
+    orien_X = orien_expr_filtered.T
+    
+    # Match samples with survival data
+    tcga_common = tcga_X.index.intersection(tcga_surv['sample'])
+    orien_common = orien_X.index.intersection(orien_surv['sample'])
+    
+    logger.info(f"  TCGA: {len(tcga_common)}/{len(tcga_X)} samples matched")
+    logger.info(f"  ORIEN: {len(orien_common)}/{len(orien_X)} samples matched")
+    
+    # Filter to common samples
+    tcga_X = tcga_X.loc[tcga_common]
+    orien_X = orien_X.loc[orien_common]
+    
+    tcga_surv = tcga_surv[tcga_surv['sample'].isin(tcga_common)].set_index('sample').loc[tcga_common]
+    orien_surv = orien_surv[orien_surv['sample'].isin(orien_common)].set_index('sample').loc[orien_common]
+    
+    # Standardize features (Z-score normalization)
+    logger.info("Standardizing expression data...")
+    tcga_X_std = (tcga_X - tcga_X.mean()) / tcga_X.std()
+    orien_X_std = (orien_X - orien_X.mean()) / orien_X.std()
+    
+    # Prepare data dictionaries
+    tcga_data = {
+        'X': tcga_X_std.values.astype(np.float32),
+        'y_time': tcga_surv['time'].values.astype(np.float32),
+        'y_event': tcga_surv['event'].values.astype(np.int32),
+        'sample_ids': tcga_X_std.index.tolist()
+    }
+    
+    orien_data = {
+        'X': orien_X_std.values.astype(np.float32),
+        'y_time': orien_surv['time'].values.astype(np.float32),
+        'y_event': orien_surv['event'].values.astype(np.int32),
+        'sample_ids': orien_X_std.index.tolist()
+    }
+    
+    return tcga_data, orien_data
 
 # ============================================================
 # Helper Functions
