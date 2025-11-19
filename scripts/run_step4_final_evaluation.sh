@@ -60,7 +60,7 @@ fi
 print_success "Step 3 results found"
 
 # Check if consensus genes exist
-if [ ! -f "results_v2/02_biomarker_discovery/ksweep_analysis/consensus_genes_k120.txt" ]; then
+if [ ! -f "results_v2/02_biomarker_discovery/ksweep_analysis/gene_lists/k120_consensus.txt" ]; then
     print_error "Consensus genes file not found"
     exit 1
 fi
