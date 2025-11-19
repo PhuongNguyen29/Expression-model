@@ -213,7 +213,7 @@ def get_pretrain_config(direction, source_params_file, n_features=51):
         architecture = [96, 48]
     
     config = {
-        'in_features': n_features,
+        'n_features': n_features,
         'layers': architecture,
         'dropout': source_params['dropout'],
         'activation': source_params['activation'],

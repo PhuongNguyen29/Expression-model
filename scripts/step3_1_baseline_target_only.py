@@ -183,7 +183,7 @@ def get_model_config(cohort_name, params_file, n_features=51):
     
     if cohort_name == 'tcga':
         config = {
-            'in_features': n_features,
+            'n_features': n_features,
             'layers': [48, 24],
             'dropout': params['dropout'],
             'activation': params['activation'],
@@ -197,7 +197,7 @@ def get_model_config(cohort_name, params_file, n_features=51):
         
     else:  # orien
         config = {
-            'in_features': n_features,
+            'n_features': n_features,
             'layers': [96, 48],
             'dropout': params['dropout'],
             'activation': params['activation'],
