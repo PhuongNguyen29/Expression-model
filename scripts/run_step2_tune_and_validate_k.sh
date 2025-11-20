@@ -19,11 +19,10 @@ set -e  # Exit on error
 # Default parameters
 K_VALUES="80 90 100 110 120 130 140 150"
 N_TRIALS=50
-N_JOBS=8
+
 OUTPUT_DIR="results_v2/02_biomarker_discovery/k_selection_with_tuning"
 STEP1_DIR="results_v2/01_hyperparameter_tuning"
 DATA_DIR="data"
-DEVICE="cuda"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -34,14 +33,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --n_trials)
             N_TRIALS="$2"
-            shift 2
-            ;;
-        --n_jobs)
-            N_JOBS="$2"
-            shift 2
-            ;;
-        --device)
-            DEVICE="$2"
             shift 2
             ;;
         --help)
@@ -96,11 +87,9 @@ echo "Started at: $TIMESTAMP"
 python scripts/step2_tune_and_validate_k.py \
     --k_values $K_VALUES \
     --n_trials $N_TRIALS \
-    --n_jobs $N_JOBS \
     --output_dir "$OUTPUT_DIR" \
     --step1_dir "$STEP1_DIR" \
-    --data_dir "$DATA_DIR" \
-    --device "$DEVICE"
+    --data_dir "$DATA_DIR"
 
 # Check if successful
 if [ $? -eq 0 ]; then
