@@ -395,8 +395,8 @@ def load_step1_importances(step1_dir: Path) -> Dict:
     
     logger.info(f"Loaded: {len(df)} genes")
     
-    tcga_importances = df['tcga_mean'].sort_values(ascending=False)
-    orien_importances = df['orien_mean'].sort_values(ascending=False)
+    tcga_importances = df['tcga_importance_mean'].sort_values(ascending=False)
+    orien_importances = df['orien_importance_mean'].sort_values(ascending=False)
     
     logger.info(f"TCGA top 5: {tcga_importances.head().index.tolist()}")
     logger.info(f"ORIEN top 5: {orien_importances.head().index.tolist()}")
