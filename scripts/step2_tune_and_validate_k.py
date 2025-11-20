@@ -14,7 +14,12 @@ Based on: Bergstra & Bengio (2012, JMLR), Huang et al. (2020, Bioinformatics)
 """
 
 import sys
-sys.path.append('.')
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+from typing import List, Dict, Tuple
 
 import torch
 import pandas as pd
@@ -37,6 +42,7 @@ from src.utils.batch_samplers import StratifiedBatchSampler
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
 
 
 def create_survival_stratification_bins(
