@@ -20,7 +20,7 @@ data:
 
   # Processing parameters
   use_common_genes: true # CRITICAL: Only use genes present in both cohorts
-  min_variance_percentile: 10 # Remove bottom 10% variance genes
+  min_variance_percentile: 0 # Remove bottom 10% variance genes
   log_transform: false # Data already log-transformed
   standardize: true # Z-score standardization per cohort
 
