@@ -12,14 +12,12 @@
 #$ -V
 
 # Queue: UI-GPU for GPU-accelerated training
-#$ -q UI-GPU
+#$ -q UI
 
-# Request 1 GPU
-#$ -l ngpus=1
 
 # Request 8 CPU slots (for data loading, etc.)
 # Using 2x slots to avoid HT core sharing for CPU-bound operations
-#$ -pe smp 8
+#$ -pe smp 16
 
 # Memory request (adjust based on your data size)
 #$ -l mem_free=32G
