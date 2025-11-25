@@ -318,25 +318,25 @@ class LeakageFreeKSelectionTuner:
         mean_cindex = np.mean(cv_scores)
         std_cindex = np.std(cv_scores)
         
-        # Add sparsity penalty
-        try:
-            sparsity_info = model.get_sparsity_info()
-            sparsity_ratio = sparsity_info['sparsity_ratio']
+        # # Add sparsity penalty
+        # try:
+        #     sparsity_info = model.get_sparsity_info()
+        #     sparsity_ratio = sparsity_info['sparsity_ratio']
             
-            MIN_SPARSITY = 0.05
-            if sparsity_ratio < MIN_SPARSITY:
-                sparsity_penalty = 0.1 * (MIN_SPARSITY - sparsity_ratio)
-            else:
-                sparsity_penalty = 0.0
+        #     MIN_SPARSITY = 0.05
+        #     if sparsity_ratio < MIN_SPARSITY:
+        #         sparsity_penalty = 0.1 * (MIN_SPARSITY - sparsity_ratio)
+        #     else:
+        #         sparsity_penalty = 0.0
             
-            objective_value = mean_cindex - sparsity_penalty
+        #     objective_value = mean_cindex - sparsity_penalty
             
-            logger.info(f"Trial {trial.number}: C-index={mean_cindex:.4f} ± {std_cindex:.4f}, "
-                       f"Sparsity={sparsity_ratio:.1%}, Objective={objective_value:.4f}")
+        #     logger.info(f"Trial {trial.number}: C-index={mean_cindex:.4f} ± {std_cindex:.4f}, "
+        #                f"Sparsity={sparsity_ratio:.1%}, Objective={objective_value:.4f}")
             
-            return objective_value
-        except Exception as e:
-            logger.warning(f"Could not compute sparsity: {e}")
+        #     return objective_value
+        # except Exception as e:
+        #     logger.warning(f"Could not compute sparsity: {e}")
         
         logger.info(f"Trial {trial.number}: {mean_cindex:.4f} ± {std_cindex:.4f}")
         return mean_cindex
