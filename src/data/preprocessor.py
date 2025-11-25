@@ -272,9 +272,9 @@ class GeneExpressionPreprocessor:
         """
         logger.info(f"Preprocessing {cohort_name} (single cohort mode)")
         logger.info(f"  Input shape: {expr_data.shape} (genes × samples)")
+        gene_var = self.compute_gene_variance(expr_data)
         
         if self.min_variance_percentile > 0:
-            gene_var = self.compute_gene_variance(expr_data)
             threshold = np.percentile(gene_var, self.min_variance_percentile)
             selected_genes = gene_var[gene_var > threshold].index.tolist()
             filtered = expr_data.loc[selected_genes]
