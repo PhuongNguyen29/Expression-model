@@ -190,33 +190,33 @@ class LeakageFreeKSelectionTuner:
         if self.n_samples < 500:  # TCGA
             n_layers = trial.suggest_int('n_layers', 1, 2)
             if n_layers == 1:
-                layer1_size = trial.suggest_categorical('layer1_size', [32, 64, 128])
+                layer1_size = trial.suggest_categorical('layer1_size', [16, 24, 32])
                 hidden_sizes = [layer1_size]
                 alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
             else:  # 2 layers
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['64-32', '96-48', '128-64', '128-32']
+                    ['32-16', '48-24']
                 )
                 hidden_sizes = [int(x) for x in architecture.split('-')]
                 alpha = trial.suggest_float('alpha', 1e-5, 5e-4, log=True)
         else:  # ORIEN
             n_layers = trial.suggest_int('n_layers', 1, 3)
             if n_layers == 1:
-                layer1_size = trial.suggest_categorical('layer1_size', [128, 256, 512])
+                layer1_size = trial.suggest_categorical('layer1_size', [32, 48, 64])
                 hidden_sizes = [layer1_size]
                 alpha = trial.suggest_float('alpha', 1e-5, 1e-3, log=True)
             elif n_layers == 2:
                 architecture = trial.suggest_categorical(
                     'architecture_2layer',
-                    ['256-128', '256-64', '128-64', '96-48']
+                    ['48-24', '64-32', '32-16']
                 )
                 hidden_sizes = [int(x) for x in architecture.split('-')]
                 alpha = trial.suggest_float('alpha', 1e-6, 1e-4, log=True)
             else:  # 3 layers
                 architecture = trial.suggest_categorical(
                     'architecture_3layer',
-                    ['256-128-64', '192-96-48', '128-64-32']
+                    ['48-32-24', '64-48-32', '32-24-16']
                 )
                 hidden_sizes = [int(x) for x in architecture.split('-')]
                 alpha = trial.suggest_float('alpha', 1e-6, 5e-5, log=True)
