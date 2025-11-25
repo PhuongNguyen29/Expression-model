@@ -273,17 +273,25 @@ class GeneExpressionPreprocessor:
         logger.info(f"Preprocessing {cohort_name} (single cohort mode)")
         logger.info(f"  Input shape: {expr_data.shape} (genes × samples)")
         
-        # Step 1: Variance filtering on this cohort only
-        gene_var = self.compute_gene_variance(expr_data)
-        threshold = np.percentile(gene_var, self.min_variance_percentile)
-        selected_genes = gene_var[gene_var > threshold].index.tolist()
+        if self.min_variance_percentile > 0:
+            gene_var = self.compute_gene_variance(expr_data)
+            threshold = np.percentile(gene_var, self.min_variance_percentile)
+            selected_genes = gene_var[gene_var > threshold].index.tolist()
+            filtered = expr_data.loc[selected_genes]
+            logger.info(f"  After variance filter: {len(selected_genes)} genes "
+                        f"({100*len(selected_genes)/len(expr_data):.1f}% retained)")
+        else:
+            selected_genes = expr_data.index.tolist()
+            filtered = expr_data
+            logger.info(f"  Variance filter disabled, keeping all {len(selected_genes)} genes")
+    
         
         self.selected_genes = selected_genes
         self.gene_variances = gene_var
         
-        filtered = expr_data.loc[selected_genes]
-        logger.info(f"  After variance filter: {len(selected_genes)} genes "
-                    f"({100*len(selected_genes)/len(expr_data):.1f}% retained)")
+        # filtered = expr_data.loc[selected_genes]
+        # logger.info(f"  After variance filter: {len(selected_genes)} genes "
+        #             f"({100*len(selected_genes)/len(expr_data):.1f}% retained)")
         
         # Step 2: Standardization (z-score)
         if self.standardize:
