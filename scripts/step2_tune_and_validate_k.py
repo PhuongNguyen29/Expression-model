@@ -225,7 +225,10 @@ class LeakageFreeKSelectionTuner:
         dropout = trial.suggest_float('dropout', 0.3, 0.5)
         learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-4, log=True)
         l1_ratio = trial.suggest_float('l1_ratio', 0.3, 0.9)
-        batch_size = trial.suggest_categorical('batch_size', [32, 64])
+        if self.n_samples < 500:  # TCGA
+            batch_size = trial.suggest_categorical('batch_size', [64, 128])
+        else:  # ORIEN
+            batch_size = trial.suggest_categorical('batch_size', [32, 64])
         activation = trial.suggest_categorical('activation', ['relu', 'elu'])
         batch_norm = trial.suggest_categorical('batch_norm', [True, False])
         
@@ -251,19 +254,26 @@ class LeakageFreeKSelectionTuner:
                     train_idx, val_idx
                 )
                 
-                # Create dataloaders
-                train_sampler = StratifiedBatchSampler(
-                    events=train_events,
-                    batch_size=batch_size,
-                    min_events_per_batch=2,
-                    shuffle=True
-                )
-                
-                train_loader = DataLoader(
-                    train_dataset,
-                    batch_sampler=train_sampler,
-                    num_workers=0
-                )
+                # Create dataloaders - conditional based on cohort size
+                if self.n_samples < 500:  # TCGA - use simple shuffle
+                    train_loader = DataLoader(
+                        train_dataset,
+                        batch_size=batch_size,
+                        shuffle=True,
+                        num_workers=0
+                    )
+                else:  # ORIEN - use stratified sampling
+                    train_sampler = StratifiedBatchSampler(
+                        events=train_events,
+                        batch_size=batch_size,
+                        min_events_per_batch=2,
+                        shuffle=True
+                    )
+                    train_loader = DataLoader(
+                        train_dataset,
+                        batch_sampler=train_sampler,
+                        num_workers=0
+                    )
                 
                 val_loader = DataLoader(
                     val_dataset,
