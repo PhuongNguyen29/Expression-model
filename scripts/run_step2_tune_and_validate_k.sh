@@ -17,7 +17,7 @@
 set -e  # Exit on error
 
 # Default parameters
-K_VALUES="80 90 100 110 120 130 140 150"
+K_VALUES="100 110 120 130 140 150"
 N_TRIALS=50
 
 OUTPUT_DIR="results_v2/02_biomarker_discovery/k_selection_with_tuning"
@@ -71,13 +71,6 @@ echo "  With n_jobs=$N_JOBS: ~2-3 hours"
 echo "  Total for ${#K_VALUES[@]} k-values: ~16-24 hours"
 echo ""
 
-# Confirm before running
-read -p "Continue? (y/n) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 0
-fi
 
 # Create timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
