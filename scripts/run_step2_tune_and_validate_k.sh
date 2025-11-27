@@ -17,7 +17,7 @@
 set -e  # Exit on error
 
 # Default parameters
-K_VALUES="80 85 90 95"
+K_VALUES="80 85 90 95 105"
 N_TRIALS=50
 
 OUTPUT_DIR="results_v2/02_biomarker_discovery/k_selection_with_tuning"
