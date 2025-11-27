@@ -8,15 +8,15 @@ Protocol:
 - Load SAME train/test splits from Step 3.1 for fair comparison
 - Fine-tune on target cohort's train split
 - Learning rate: 10× reduction from source cohort's LR
-- Regularization: Keep SOURCE cohort's values (dropout, alpha, l1_ratio)
+- Regularization: Keep values from pre-trained model config
 - Batch size: Use TARGET cohort's batch size
-- Fixed 40 epochs (no early stopping)
+- Early stopping based on test C-index (patience=20)
 - Evaluate on target cohort's test split
 - Multi-seed validation (seeds: 42, 123, 456, 789, 1011)
 
 Directions:
-- ORIEN→TCGA: Fine-tune ORIEN pre-trained model on TCGA
-- TCGA→ORIEN: Fine-tune TCGA pre-trained model on ORIEN
+- ORIEN→TCGA: Fine-tune ORIEN pre-trained model on TCGA train, evaluate on TCGA test
+- TCGA→ORIEN: Fine-tune TCGA pre-trained model on ORIEN train, evaluate on ORIEN test
 """
 
 import sys
@@ -31,6 +31,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader, Subset
 from lifelines.utils import concordance_index
 import matplotlib.pyplot as plt
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -39,50 +40,6 @@ from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.data.dataset import SurvivalDataset
 from src.utils.batch_samplers import StratifiedBatchSampler
 
-def plot_training_curves(history, output_path, title, show_validation=False):
-    """Plot training curves"""
-    
-    epochs = [h['epoch'] for h in history]
-    train_loss = [h['train_loss'] for h in history]
-    
-    if show_validation:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        
-        # Loss
-        ax1.plot(epochs, train_loss, 'b-', label='Train Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{title} - Loss')
-        ax1.legend()
-        ax1.grid(alpha=0.3)
-        
-        # C-index
-        train_cindex = [h['train_cindex'] for h in history]
-        valid_cindex = [h['valid_cindex'] for h in history]
-        ax2.plot(epochs, train_cindex, 'b-', label='Train C-index')
-        ax2.plot(epochs, valid_cindex, 'r-', label='Valid C-index')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('C-index')
-        ax2.set_title(f'{title} - C-index')
-        ax2.legend()
-        ax2.grid(alpha=0.3)
-        
-        # Mark best epoch if available
-        if 'best_epoch' in history[-1]:
-            best_epoch = history[-1]['best_epoch']
-            ax2.axvline(best_epoch, color='g', linestyle='--', 
-                       label=f'Best Epoch: {best_epoch}')
-    else:
-        fig, ax1 = plt.subplots(1, 1, figsize=(8, 4))
-        ax1.plot(epochs, train_loss, 'b-')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{title} - Training Loss')
-        ax1.grid(alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
 
 def setup_logging(output_dir, direction, seed):
     """Setup logging configuration"""
@@ -119,6 +76,13 @@ def load_consensus_genes(consensus_file):
     return genes
 
 
+def load_hyperparameters(params_file):
+    """Load hyperparameters from JSON file"""
+    with open(params_file, 'r') as f:
+        data = json.load(f)
+    return data['best_params']
+
+
 def load_data(consensus_genes, logger):
     """Load and filter data to consensus genes"""
     logger.info("Loading data files...")
@@ -133,8 +97,17 @@ def load_data(consensus_genes, logger):
     
     # Filter to consensus genes
     logger.info(f"Filtering to {len(consensus_genes)} consensus genes...")
-    tcga_expr = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
-    orien_expr = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
+    
+    # Check which genes are available
+    available_tcga = [g for g in consensus_genes if g in tcga_expr.index]
+    available_orien = [g for g in consensus_genes if g in orien_expr.index]
+    
+    # Use intersection of available genes
+    common_genes = sorted(list(set(available_tcga) & set(available_orien)))
+    logger.info(f"Using {len(common_genes)} genes available in both cohorts")
+    
+    tcga_expr = tcga_expr.loc[common_genes]
+    orien_expr = orien_expr.loc[common_genes]
     
     # Harmonize sample IDs
     tcga_expr, tcga_surv = harmonize_samples(tcga_expr, tcga_surv, logger, "TCGA")
@@ -149,7 +122,8 @@ def load_data(consensus_genes, logger):
         'tcga_expr': tcga_expr,
         'orien_expr': orien_expr,
         'tcga_surv': tcga_surv,
-        'orien_surv': orien_surv
+        'orien_surv': orien_surv,
+        'n_features': len(common_genes)
     }
 
 
@@ -183,6 +157,9 @@ def get_finetune_config(direction, source_params_file, target_params_file):
     """
     Get fine-tuning configuration.
     
+    Fine-tuning LR = source LR / 10 (10× reduction)
+    Batch size from target cohort
+    
     Args:
         direction: 'orien_to_tcga' or 'tcga_to_orien'
         source_params_file: Path to source cohort's best_params.json
@@ -191,11 +168,8 @@ def get_finetune_config(direction, source_params_file, target_params_file):
     Returns:
         target_cohort, finetune_lr, target_batch_size
     """
-    with open(source_params_file, 'r') as f:
-        source_params = json.load(f)
-    
-    with open(target_params_file, 'r') as f:
-        target_params = json.load(f)
+    source_params = load_hyperparameters(source_params_file)
+    target_params = load_hyperparameters(target_params_file)
     
     if direction == 'orien_to_tcga':
         target_cohort = 'tcga'
@@ -206,16 +180,54 @@ def get_finetune_config(direction, source_params_file, target_params_file):
         source_lr = source_params['learning_rate']  # TCGA's LR
         target_batch_size = target_params['batch_size']  # ORIEN's batch size
     
-    # Fine-tuning LR = 0.2 × source LR
+    # Fine-tuning LR = source LR / 10
     finetune_lr = source_lr / 10
     
     return target_cohort, finetune_lr, target_batch_size
+
+
+def plot_training_curves(history, output_path, title):
+    """Plot training curves with train and test C-index"""
+    epochs = [h['epoch'] for h in history]
+    train_loss = [h['train_loss'] for h in history]
+    train_cindex = [h['train_cindex'] for h in history]
+    test_cindex = [h['test_cindex'] for h in history]
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    
+    # Loss
+    ax1.plot(epochs, train_loss, 'b-', linewidth=1.5)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Training Loss')
+    ax1.set_title(f'{title} - Training Loss')
+    ax1.grid(alpha=0.3)
+    
+    # C-index
+    ax2.plot(epochs, train_cindex, 'b-', label='Train C-index', linewidth=1.5)
+    ax2.plot(epochs, test_cindex, 'r-', label='Test C-index', linewidth=1.5)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('C-index')
+    ax2.set_title(f'{title} - C-index')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    
+    # Mark best epoch
+    if history and 'best_epoch' in history[-1]:
+        best_epoch = history[-1]['best_epoch']
+        ax2.axvline(best_epoch, color='g', linestyle='--', 
+                   label=f'Best: {best_epoch}', alpha=0.7)
+        ax2.legend()
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
 
 
 def train_epoch(model, train_loader, optimizer, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0.0
+    n_batches = 0
     
     for batch in train_loader:
         features = batch['features'].to(device)
@@ -226,12 +238,20 @@ def train_epoch(model, train_loader, optimizer, device):
         risk = model(features)
         loss = model.compute_loss(risk, time, event)
         
+        if torch.isnan(loss) or torch.isinf(loss):
+            continue
+        
         loss.backward()
+        
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         total_loss += loss.item()
+        n_batches += 1
     
-    return total_loss / len(train_loader)
+    return total_loss / max(n_batches, 1)
 
 
 def evaluate(model, dataset, indices, device):
@@ -290,13 +310,17 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     logger.info(f"Fine-tuning: {direction.upper()} - Seed {seed}")
     logger.info(f"{'='*60}")
     
+    # Set random seeds
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
     # Get fine-tuning configuration
     target_cohort, finetune_lr, target_batch_size = get_finetune_config(
         direction, source_params_file, target_params_file
     )
     
     logger.info(f"Target cohort: {target_cohort.upper()}")
-    logger.info(f"Fine-tuning LR: {finetune_lr:.6f} (10× reduction)")
+    logger.info(f"Fine-tuning LR: {finetune_lr:.6f} (10× reduction from source)")
     logger.info(f"Target batch size: {target_batch_size}")
     
     # Create dataset
@@ -305,12 +329,12 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     # Load SAME split as Step 3.1
     train_idx, test_idx = load_saved_split(split_dir, target_cohort, seed)
     
-    logger.info(f"Loaded saved split from Step 3.1:")
+    logger.info(f"\nLoaded saved split from Step 3.1:")
     logger.info(f"  Train: {len(train_idx)} samples")
     logger.info(f"  Test: {len(test_idx)} samples")
-    logger.info(f"  Train events: {dataset.y_event[train_idx].sum()}/{len(train_idx)} "
+    logger.info(f"  Train events: {dataset.y_event[train_idx].sum():.0f}/{len(train_idx)} "
                 f"({100*dataset.y_event[train_idx].mean():.1f}%)")
-    logger.info(f"  Test events: {dataset.y_event[test_idx].sum()}/{len(test_idx)} "
+    logger.info(f"  Test events: {dataset.y_event[test_idx].sum():.0f}/{len(test_idx)} "
                 f"({100*dataset.y_event[test_idx].mean():.1f}%)")
     
     # Load pre-trained model
@@ -318,27 +342,32 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     checkpoint = torch.load(pretrain_model_path, map_location=device)
     
     model_config = checkpoint['config']
+    pretrain_cindex = checkpoint.get('final_train_cindex', checkpoint.get('best_valid_cindex', 0.0))
+    
     logger.info(f"Pre-trained model architecture: {model_config['hidden_sizes']}")
-    logger.info(f"Pre-trained model C-index: {checkpoint['best_valid_cindex']:.4f}")
+    logger.info(f"Pre-trained model train C-index: {pretrain_cindex:.4f}")
     
     # Initialize model with pre-trained weights
     model = ElasticDeepSurv(**model_config).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Re-initialize optimizer (fresh optimizer state)
+    # Count parameters
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total trainable parameters: {n_params:,}")
+    
+    # Re-initialize optimizer (fresh optimizer state for fine-tuning)
     optimizer = torch.optim.Adam(model.parameters(), lr=finetune_lr)
     
-    logger.info(f"\nModel successfully loaded and ready for fine-tuning")
-    logger.info(f"All layers trainable: {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
+    logger.info(f"\nModel loaded and ready for fine-tuning")
     
     # Create train loader
     train_dataset = Subset(dataset, train_idx)
     train_events = dataset.y_event[train_idx]
     
-    # Use stratified batch sampler for large cohorts, simple shuffle for small
+    # Use stratified batch sampler for larger cohorts
     n_samples = len(train_idx)
     if n_samples >= 500:
-        logger.info("Using StratifiedBatchSampler (large cohort)")
+        logger.info("Using StratifiedBatchSampler")
         train_batch_sampler = StratifiedBatchSampler(
             events=train_events,
             batch_size=target_batch_size,
@@ -348,63 +377,92 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         )
         train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
     else:
-        logger.info("Using simple random shuffling (small cohort)")
+        logger.info("Using simple random shuffling (smaller target cohort)")
         train_loader = DataLoader(train_dataset, batch_size=target_batch_size, shuffle=True)
     
-    # Fine-tuning loop (40 epochs fixed)
-    logger.info(f"\nStarting fine-tuning (40 epochs)...")
+    # Fine-tuning settings
+    max_epochs = 100
+    patience = 20
+    
+    logger.info(f"\nFine-tuning Settings:")
+    logger.info(f"  Max epochs: {max_epochs}")
+    logger.info(f"  Early stopping patience: {patience}")
+    
+    # Evaluate before fine-tuning (zero-shot transfer)
+    zero_shot_train = evaluate(model, dataset, train_idx, device)
+    zero_shot_test = evaluate(model, dataset, test_idx, device)
+    logger.info(f"\nZero-shot (before fine-tuning):")
+    logger.info(f"  Train C-index: {zero_shot_train:.4f}")
+    logger.info(f"  Test C-index: {zero_shot_test:.4f}")
+    
+    # Fine-tuning loop with early stopping
+    logger.info(f"\nStarting fine-tuning...")
     
     training_history = []
-    best_test_cindex = 0.0  # ✅ Track TEST C-index
+    best_test_cindex = 0.0
     best_train_cindex = 0.0
     best_epoch = 0
     best_model_state = None
+    epochs_without_improvement = 0
     
-    for epoch in range(200):
+    for epoch in range(max_epochs):
         train_loss = train_epoch(model, train_loader, optimizer, device)
+        train_cindex = evaluate(model, dataset, train_idx, device)
+        test_cindex = evaluate(model, dataset, test_idx, device)
         
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            train_cindex = evaluate(model, dataset, train_idx, device)
-            test_cindex = evaluate(model, dataset, test_idx, device)
-            logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
-                   f"Train C-index={train_cindex:.4f}, "
-                   f"Test C-index={test_cindex:.4f}")
-            
-            if test_cindex > best_test_cindex:
-                best_test_cindex = test_cindex
-                best_train_cindex = train_cindex
-                best_epoch = epoch + 1
-                best_model_state = model.state_dict().copy()  # ✅ Save best
-                logger.info(f"      *** NEW BEST TEST C-INDEX ***")
-            
-            training_history.append({
+        training_history.append({
             'epoch': epoch + 1,
             'train_loss': float(train_loss),
             'train_cindex': float(train_cindex),
-            'test_cindex': float(test_cindex)  # ✅ Save both
+            'test_cindex': float(test_cindex)
         })
+        
+        # Check for improvement on test set
+        if test_cindex > best_test_cindex:
+            best_test_cindex = test_cindex
+            best_train_cindex = train_cindex
+            best_epoch = epoch + 1
+            best_model_state = model.state_dict().copy()
+            epochs_without_improvement = 0
+            
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
+                           f"Train={train_cindex:.4f}, Test={test_cindex:.4f} *** BEST ***")
+        else:
+            epochs_without_improvement += 1
+            
+            if (epoch + 1) % 10 == 0:
+                logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
+                           f"Train={train_cindex:.4f}, Test={test_cindex:.4f} "
+                           f"(no improvement: {epochs_without_improvement}/{patience})")
+            
+            if epochs_without_improvement >= patience:
+                logger.info(f"\nEarly stopping at epoch {epoch+1}")
+                break
     
-    # Final evaluation on test set
+    # Add best epoch info to history
+    if training_history:
+        training_history[-1]['best_epoch'] = best_epoch
+    
+    # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        logger.info(f"\nRestored model from epoch {best_epoch} "
-                f"(best test C-index: {best_test_cindex:.4f})")
+        logger.info(f"\nRestored model from epoch {best_epoch}")
     
+    # Final summary
     logger.info(f"\nFine-tuning Complete:")
     logger.info(f"  Best epoch: {best_epoch}")
-    logger.info(f"  Best test C-index: {best_test_cindex:.4f}")
-    logger.info(f"  Train C-index at best epoch: {best_train_cindex:.4f}")
+    logger.info(f"  Zero-shot test C-index: {zero_shot_test:.4f}")
+    logger.info(f"  Fine-tuned test C-index: {best_test_cindex:.4f}")
+    logger.info(f"  Improvement: {best_test_cindex - zero_shot_test:+.4f} ({100*(best_test_cindex - zero_shot_test)/max(zero_shot_test, 0.001):+.1f}%)")
+    logger.info(f"  Train C-index at best: {best_train_cindex:.4f}")
     
-    # Calculate improvement over zero-shot (if available)
-    # Note: Zero-shot results should come from Step 2.2B
-    # For now, we'll just report the test C-index
-    
-    if training_history:  # Only plot if we have history
+    # Plot training curves
+    if training_history:
         plot_training_curves(
             training_history,
             output_dir / f'seed{seed}_finetuning_curve.png',
-            f'{direction.upper()} Fine-tuning Seed {seed}',
-            show_validation=False
+            f'{direction.upper()} Fine-tuning Seed {seed}'
         )
         logger.info(f"Saved training curve to {output_dir / f'seed{seed}_finetuning_curve.png'}")
     
@@ -413,9 +471,14 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         'direction': direction,
         'seed': seed,
         'target_cohort': target_cohort,
-        'pretrain_valid_cindex': float(checkpoint['best_valid_cindex']),
+        'pretrain_train_cindex': float(pretrain_cindex),
+        'zero_shot_train_cindex': float(zero_shot_train),
+        'zero_shot_test_cindex': float(zero_shot_test),
         'finetune_train_cindex': float(best_train_cindex),
-        'finetune_test_cindex': float(test_cindex),
+        'finetune_test_cindex': float(best_test_cindex),
+        'improvement_over_zero_shot': float(best_test_cindex - zero_shot_test),
+        'best_epoch': best_epoch,
+        'total_epochs': len(training_history),
         'n_train': len(train_idx),
         'n_test': len(test_idx),
         'n_train_events': int(train_events.sum()),
@@ -427,9 +490,13 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
             'dropout': model_config['dropout'],
             'alpha': model_config['alpha'],
             'l1_ratio': model_config['l1_ratio'],
-            'batch_norm': model_config['batch_norm']
+            'batch_norm': model_config['batch_norm'],
+            'activation': model_config['activation']
         },
-        'training_history': training_history
+        'training_settings': {
+            'max_epochs': max_epochs,
+            'patience': patience
+        }
     }
     
     # Save results JSON
@@ -447,11 +514,13 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         'config': model_config,
         'seed': seed,
         'direction': direction,
-        'test_cindex': test_cindex,
-        'pretrain_cindex': checkpoint['best_valid_cindex']
-    }, output_dir / f'seed{seed}_finetune_model.pth')
+        'best_epoch': best_epoch,
+        'finetune_test_cindex': best_test_cindex,
+        'zero_shot_test_cindex': zero_shot_test,
+        'pretrain_cindex': pretrain_cindex
+    }, output_dir / f'seed{seed}_finetuned_model.pth')
     
-    logger.info(f"Saved fine-tuned model to {output_dir / f'seed{seed}_finetune_model.pth'}")
+    logger.info(f"Saved fine-tuned model to {output_dir / f'seed{seed}_finetuned_model.pth'}")
     
     return results
 
@@ -468,37 +537,54 @@ def aggregate_results(output_dir, direction, logger):
         with open(seed_file, 'r') as f:
             results.append(json.load(f))
     
+    if not results:
+        logger.warning("No results found to aggregate")
+        return None
+    
     # Create summary DataFrame
     df = pd.DataFrame(results)
     
     summary = {
         'direction': direction,
         'n_seeds': len(results),
-        'mean_test_cindex': df['finetune_test_cindex'].mean(),
-        'std_test_cindex': df['finetune_test_cindex'].std(),
-        'min_test_cindex': df['finetune_test_cindex'].min(),
-        'max_test_cindex': df['finetune_test_cindex'].max(),
-        'mean_pretrain_cindex': df['pretrain_valid_cindex'].mean()
+        'mean_zero_shot_test': df['zero_shot_test_cindex'].mean(),
+        'std_zero_shot_test': df['zero_shot_test_cindex'].std(),
+        'mean_finetune_test': df['finetune_test_cindex'].mean(),
+        'std_finetune_test': df['finetune_test_cindex'].std(),
+        'mean_improvement': df['improvement_over_zero_shot'].mean(),
+        'std_improvement': df['improvement_over_zero_shot'].std(),
+        'min_finetune_test': df['finetune_test_cindex'].min(),
+        'max_finetune_test': df['finetune_test_cindex'].max(),
+        'mean_best_epoch': df['best_epoch'].mean()
     }
     
     # Print summary
     logger.info(f"\n{direction.upper()} Fine-tuning Summary:")
-    logger.info(f"  Test C-index: {summary['mean_test_cindex']:.4f} ± {summary['std_test_cindex']:.4f}")
-    logger.info(f"  Range: {summary['min_test_cindex']:.4f} - {summary['max_test_cindex']:.4f}")
-    logger.info(f"  Mean pre-train C-index: {summary['mean_pretrain_cindex']:.4f}")
+    logger.info(f"  Zero-shot test C-index: {summary['mean_zero_shot_test']:.4f} ± {summary['std_zero_shot_test']:.4f}")
+    logger.info(f"  Fine-tuned test C-index: {summary['mean_finetune_test']:.4f} ± {summary['std_finetune_test']:.4f}")
+    logger.info(f"  Improvement: {summary['mean_improvement']:+.4f} ± {summary['std_improvement']:.4f}")
+    logger.info(f"  Range: {summary['min_finetune_test']:.4f} - {summary['max_finetune_test']:.4f}")
+    logger.info(f"  Average best epoch: {summary['mean_best_epoch']:.1f}")
+    
+    # Save summary
+    with open(output_dir / 'summary.json', 'w') as f:
+        json.dump(summary, f, indent=2)
     
     return summary
 
 
 def main():
-    # Configuration
+    # Configuration for k=155 (87 consensus genes)
     SEEDS = [42, 123, 456, 789, 1011]
-    CONSENSUS_GENES_FILE = "results_v2/02_biomarker_discovery/ksweep_analysis/gene_lists/k120_consensus.txt"
-    TCGA_PARAMS_FILE = "results_v2/01_hyperparameter_tuning/tcga_308genes/best_params.json"
-    ORIEN_PARAMS_FILE = "results_v2/01_hyperparameter_tuning/orien_308genes/best_params.json"
-    PRETRAIN_BASE_DIR = Path("results_v2/03_transfer_learning/pretraining")
-    SPLIT_DIR = Path("results_v2/03_transfer_learning/baseline2_target_only/splits")
-    BASE_OUTPUT_DIR = Path("results_v2/03_transfer_learning/finetuning")
+    K_VALUE = 155
+    
+    # File paths for k=155
+    CONSENSUS_GENES_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/consensus_genes/consensus_genes.txt"
+    TCGA_PARAMS_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/hyperparameter_tuning/tcga/best_params.json"
+    ORIEN_PARAMS_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/hyperparameter_tuning/orien/best_params.json"
+    PRETRAIN_BASE_DIR = Path(f"results_v2/03_transfer_learning/k{K_VALUE}/pretrained")
+    SPLIT_DIR = Path(f"results_v2/03_transfer_learning/k{K_VALUE}/baseline_target_only/splits")
+    BASE_OUTPUT_DIR = Path(f"results_v2/03_transfer_learning/k{K_VALUE}/finetuned")
     
     # Setup
     BASE_OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
@@ -507,36 +593,72 @@ def main():
     print("="*60)
     print("Step 3.3: Fine-tuning Phase")
     print("="*60)
+    print(f"K-value: {K_VALUE}")
     print(f"Seeds: {SEEDS}")
     print(f"Device: {device}")
     print(f"Output: {BASE_OUTPUT_DIR}")
     
-    # Verify split directory exists
+    # Verify input directories exist
+    if not PRETRAIN_BASE_DIR.exists():
+        raise FileNotFoundError(
+            f"Pre-trained models not found: {PRETRAIN_BASE_DIR}\n"
+            "Please run Step 3.2 first."
+        )
+    
     if not SPLIT_DIR.exists():
         raise FileNotFoundError(
             f"Split directory not found: {SPLIT_DIR}\n"
             "Please run Step 3.1 first to create train/test splits."
         )
     
+    # Verify file paths
+    for filepath, desc in [
+        (CONSENSUS_GENES_FILE, "Consensus genes"),
+        (TCGA_PARAMS_FILE, "TCGA hyperparameters"),
+        (ORIEN_PARAMS_FILE, "ORIEN hyperparameters")
+    ]:
+        if not Path(filepath).exists():
+            raise FileNotFoundError(f"{desc} not found: {filepath}")
+        print(f"✓ Found {desc}")
+    
     # Load consensus genes
     consensus_genes = load_consensus_genes(CONSENSUS_GENES_FILE)
-    print(f"\nLoaded {len(consensus_genes)} consensus genes from k=120")
+    print(f"\nLoaded {len(consensus_genes)} consensus genes from k={K_VALUE}")
+    
+    # Setup initial logger for data loading
+    data_logger = logging.getLogger('data_loader')
+    data_logger.setLevel(logging.INFO)
+    if not data_logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        data_logger.addHandler(ch)
     
     # Load data
     print("\nLoading data...")
-    data = load_data(consensus_genes, logging.getLogger('data_loader'))
+    data = load_data(consensus_genes, data_logger)
     
     # Fine-tune for both directions
     directions = [
-        ('orien_to_tcga', data['tcga_expr'], data['tcga_surv'], 
-         ORIEN_PARAMS_FILE, TCGA_PARAMS_FILE),
-        ('tcga_to_orien', data['orien_expr'], data['orien_surv'],
-         TCGA_PARAMS_FILE, ORIEN_PARAMS_FILE)
+        {
+            'name': 'orien_to_tcga',
+            'target_expr': data['tcga_expr'],
+            'target_surv': data['tcga_surv'],
+            'source_params': ORIEN_PARAMS_FILE,
+            'target_params': TCGA_PARAMS_FILE
+        },
+        {
+            'name': 'tcga_to_orien',
+            'target_expr': data['orien_expr'],
+            'target_surv': data['orien_surv'],
+            'source_params': TCGA_PARAMS_FILE,
+            'target_params': ORIEN_PARAMS_FILE
+        }
     ]
     
     all_summaries = []
     
-    for direction, target_expr, target_surv, source_params, target_params in directions:
+    for dir_config in directions:
+        direction = dir_config['name']
         output_dir = BASE_OUTPUT_DIR / direction
         output_dir.mkdir(exist_ok=True, parents=True)
         pretrain_dir = PRETRAIN_BASE_DIR / direction
@@ -548,8 +670,8 @@ def main():
         for seed in SEEDS:
             logger = setup_logging(output_dir, direction, seed)
             
-            # Get pre-trained model path
-            pretrain_model_path = pretrain_dir / f'seed{seed}_pretrain_model.pth'
+            # Get pre-trained model path (note: filename is seed{seed}_pretrained_model.pth)
+            pretrain_model_path = pretrain_dir / f'seed{seed}_pretrained_model.pth'
             
             if not pretrain_model_path.exists():
                 logger.error(f"Pre-trained model not found: {pretrain_model_path}")
@@ -558,11 +680,11 @@ def main():
             
             finetune_model(
                 direction=direction,
-                target_expr=target_expr,
-                target_surv=target_surv,
+                target_expr=dir_config['target_expr'],
+                target_surv=dir_config['target_surv'],
                 pretrain_model_path=pretrain_model_path,
-                source_params_file=source_params,
-                target_params_file=target_params,
+                source_params_file=dir_config['source_params'],
+                target_params_file=dir_config['target_params'],
                 seed=seed,
                 split_dir=SPLIT_DIR,
                 output_dir=output_dir,
@@ -571,13 +693,24 @@ def main():
             )
         
         # Aggregate results for this direction
-        summary_logger = logging.getLogger(f'{direction}_summary')
+        summary_logger = setup_logging(output_dir, direction, 'summary')
         summary = aggregate_results(output_dir, direction, summary_logger)
-        all_summaries.append(summary)
+        if summary:
+            all_summaries.append(summary)
     
     # Save overall summary
-    summary_df = pd.DataFrame(all_summaries)
-    summary_df.to_csv(BASE_OUTPUT_DIR / 'finetuning_summary.csv', index=False)
+    if all_summaries:
+        summary_df = pd.DataFrame(all_summaries)
+        summary_df.to_csv(BASE_OUTPUT_DIR / 'finetuning_summary.csv', index=False)
+        
+        print(f"\n{'='*60}")
+        print("Fine-tuning Summary")
+        print(f"{'='*60}")
+        for summary in all_summaries:
+            print(f"\n{summary['direction'].upper()}:")
+            print(f"  Zero-shot: {summary['mean_zero_shot_test']:.4f} ± {summary['std_zero_shot_test']:.4f}")
+            print(f"  Fine-tuned: {summary['mean_finetune_test']:.4f} ± {summary['std_finetune_test']:.4f}")
+            print(f"  Improvement: {summary['mean_improvement']:+.4f}")
     
     print(f"\n{'='*60}")
     print("Step 3.3 Complete!")
