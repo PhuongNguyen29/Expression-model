@@ -1,23 +1,27 @@
 """
 Step 3.2: Pre-training Phase
 
-Purpose: Pre-train models on source cohort to learn generalizable features.
+Purpose: Pre-train models on FULL source cohort to learn generalizable features.
 
 Protocol:
-- Train on SOURCE cohort using TARGET cohort's architecture
-- Use 80/20 train/validation split for early stopping
-- Early stopping patience: 20 epochs
+- Train on FULL SOURCE cohort (no split - proper transfer learning)
+- Use TARGET cohort's architecture with SOURCE cohort's hyperparameters
+- Convergence-based stopping: stop if loss doesn't decrease by >0.001 for 20 epochs
 - Maximum epochs: 100
-- Save best pre-trained model based on validation C-index
+- Save final model after convergence
 - Multi-seed validation (seeds: 42, 123, 456, 789, 1011)
 
 Directions:
-- ORIEN→TCGA: Pre-train on ORIEN using TCGA architecture [48, 24]
-- TCGA→ORIEN: Pre-train on TCGA using ORIEN architecture [96, 48]
+- ORIEN→TCGA: Pre-train on full ORIEN (1,112 samples) using TCGA architecture [32]
+- TCGA→ORIEN: Pre-train on full TCGA (339 samples) using ORIEN architecture [48]
 
 Hyperparameters:
-- Use SOURCE cohort's Step 1 hyperparameters
-- Use TARGET cohort's architecture
+- Architecture: From TARGET cohort's k=155 tuned params
+- Training params (lr, dropout, alpha, etc.): From SOURCE cohort's k=155 tuned params
+
+References:
+- Transfer learning pretraining should use full source data (Yosinski et al., 2014)
+- Regularization (dropout, elastic net) prevents overfitting without validation set
 """
 
 import sys
@@ -29,10 +33,10 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 from datetime import datetime
-from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from lifelines.utils import concordance_index
 import matplotlib.pyplot as plt
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -41,50 +45,6 @@ from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.data.dataset import SurvivalDataset
 from src.utils.batch_samplers import StratifiedBatchSampler
 
-def plot_training_curves(history, output_path, title, show_validation=False):
-    """Plot training curves"""
-    
-    epochs = [h['epoch'] for h in history]
-    train_loss = [h['train_loss'] for h in history]
-    
-    if show_validation:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        
-        # Loss
-        ax1.plot(epochs, train_loss, 'b-', label='Train Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{title} - Loss')
-        ax1.legend()
-        ax1.grid(alpha=0.3)
-        
-        # C-index
-        train_cindex = [h['train_cindex'] for h in history]
-        valid_cindex = [h['valid_cindex'] for h in history]
-        ax2.plot(epochs, train_cindex, 'b-', label='Train C-index')
-        ax2.plot(epochs, valid_cindex, 'r-', label='Valid C-index')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('C-index')
-        ax2.set_title(f'{title} - C-index')
-        ax2.legend()
-        ax2.grid(alpha=0.3)
-        
-        # Mark best epoch if available
-        if 'best_epoch' in history[-1]:
-            best_epoch = history[-1]['best_epoch']
-            ax2.axvline(best_epoch, color='g', linestyle='--', 
-                       label=f'Best Epoch: {best_epoch}')
-    else:
-        fig, ax1 = plt.subplots(1, 1, figsize=(8, 4))
-        ax1.plot(epochs, train_loss, 'b-')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{title} - Training Loss')
-        ax1.grid(alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
 
 def setup_logging(output_dir, direction, seed):
     """Setup logging configuration"""
@@ -121,6 +81,27 @@ def load_consensus_genes(consensus_file):
     return genes
 
 
+def load_hyperparameters(params_file):
+    """Load hyperparameters from JSON file"""
+    with open(params_file, 'r') as f:
+        data = json.load(f)
+    return data['best_params']
+
+
+def get_architecture_from_params(params):
+    """Extract architecture (hidden layer sizes) from params"""
+    n_layers = params.get('n_layers', 1)
+    
+    if n_layers == 1:
+        return [params['layer1_size']]
+    elif n_layers == 2:
+        return [params['layer1_size'], params['layer2_size']]
+    elif n_layers == 3:
+        return [params['layer1_size'], params['layer2_size'], params['layer3_size']]
+    else:
+        raise ValueError(f"Unsupported n_layers: {n_layers}")
+
+
 def load_data(consensus_genes, logger):
     """Load and filter data to consensus genes"""
     logger.info("Loading data files...")
@@ -135,8 +116,25 @@ def load_data(consensus_genes, logger):
     
     # Filter to consensus genes
     logger.info(f"Filtering to {len(consensus_genes)} consensus genes...")
-    tcga_expr = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
-    orien_expr = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
+    
+    # Check which genes are available
+    available_tcga = [g for g in consensus_genes if g in tcga_expr.index]
+    available_orien = [g for g in consensus_genes if g in orien_expr.index]
+    
+    if len(available_tcga) != len(consensus_genes):
+        missing = set(consensus_genes) - set(available_tcga)
+        logger.warning(f"Missing {len(missing)} genes in TCGA: {list(missing)[:5]}...")
+    
+    if len(available_orien) != len(consensus_genes):
+        missing = set(consensus_genes) - set(available_orien)
+        logger.warning(f"Missing {len(missing)} genes in ORIEN: {list(missing)[:5]}...")
+    
+    # Use intersection of available genes
+    common_genes = sorted(list(set(available_tcga) & set(available_orien)))
+    logger.info(f"Using {len(common_genes)} genes available in both cohorts")
+    
+    tcga_expr = tcga_expr.loc[common_genes]
+    orien_expr = orien_expr.loc[common_genes]
     
     # Harmonize sample IDs
     tcga_expr, tcga_surv = harmonize_samples(tcga_expr, tcga_surv, logger, "TCGA")
@@ -151,7 +149,8 @@ def load_data(consensus_genes, logger):
         'tcga_expr': tcga_expr,
         'orien_expr': orien_expr,
         'tcga_surv': tcga_surv,
-        'orien_surv': orien_surv
+        'orien_surv': orien_surv,
+        'n_features': len(common_genes)
     }
 
 
@@ -174,44 +173,28 @@ def standardize(expr_df):
     return expr_df.subtract(expr_df.mean(axis=1), axis=0).divide(expr_df.std(axis=1), axis=0)
 
 
-def create_stratified_split(dataset, test_size=0.2, random_state=42):
-    """Create stratified train/validation split"""
-    indices = np.arange(len(dataset))
-    events = dataset.y_event
-    
-    train_idx, valid_idx = train_test_split(
-        indices,
-        test_size=test_size,
-        stratify=events,
-        random_state=random_state
-    )
-    
-    return train_idx, valid_idx
-
-
-def get_pretrain_config(direction, source_params_file, n_features=51):
+def get_pretrain_config(direction, source_params_file, target_params_file, n_features):
     """
     Get pre-training configuration.
+    
+    Uses TARGET architecture with SOURCE hyperparameters.
     
     Args:
         direction: 'orien_to_tcga' or 'tcga_to_orien'
         source_params_file: Path to source cohort's best_params.json
-        n_features: Number of input features (51 consensus genes)
+        target_params_file: Path to target cohort's best_params.json
+        n_features: Number of input features
     
     Returns:
         model_config, batch_size, learning_rate
     """
-    with open(source_params_file, 'r') as f:
-        source_params = json.load(f)
+    source_params = load_hyperparameters(source_params_file)
+    target_params = load_hyperparameters(target_params_file)
     
-    # Use TARGET cohort's architecture but SOURCE cohort's hyperparameters
-    if direction == 'orien_to_tcga':
-        # Pre-train on ORIEN, use TCGA architecture [48, 24]
-        architecture = [48, 24]
-    else:  # tcga_to_orien
-        # Pre-train on TCGA, use ORIEN architecture [96, 48]
-        architecture = [96, 48]
+    # Use TARGET architecture
+    architecture = get_architecture_from_params(target_params)
     
+    # Use SOURCE hyperparameters for training
     config = {
         'n_features': n_features,
         'hidden_sizes': architecture,
@@ -220,7 +203,7 @@ def get_pretrain_config(direction, source_params_file, n_features=51):
         'batch_norm': source_params['batch_norm'],
         'alpha': source_params['alpha'],
         'l1_ratio': source_params['l1_ratio'],
-        'weight_init': 'xavier_uniform'
+        'weight_init': source_params.get('weight_init', 'xavier_uniform')
     }
     
     batch_size = source_params['batch_size']
@@ -229,10 +212,49 @@ def get_pretrain_config(direction, source_params_file, n_features=51):
     return config, batch_size, learning_rate
 
 
+def plot_training_curves(history, output_path, title):
+    """Plot training curves"""
+    epochs = [h['epoch'] for h in history]
+    train_loss = [h['train_loss'] for h in history]
+    train_cindex = [h['train_cindex'] for h in history]
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    
+    # Loss
+    ax1.plot(epochs, train_loss, 'b-', linewidth=1.5)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Training Loss')
+    ax1.set_title(f'{title} - Training Loss')
+    ax1.grid(alpha=0.3)
+    
+    # C-index
+    ax2.plot(epochs, train_cindex, 'g-', linewidth=1.5)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Training C-index')
+    ax2.set_title(f'{title} - Training C-index')
+    ax2.grid(alpha=0.3)
+    
+    # Mark convergence point if early stopped
+    if len(history) > 0 and 'converged_epoch' in history[-1]:
+        converged_epoch = history[-1]['converged_epoch']
+        if converged_epoch is not None:
+            ax1.axvline(converged_epoch, color='r', linestyle='--', 
+                       label=f'Converged: {converged_epoch}')
+            ax2.axvline(converged_epoch, color='r', linestyle='--',
+                       label=f'Converged: {converged_epoch}')
+            ax1.legend()
+            ax2.legend()
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+
 def train_epoch(model, train_loader, optimizer, device):
     """Train for one epoch"""
     model.train()
     total_loss = 0.0
+    n_batches = 0
     
     for batch in train_loader:
         features = batch['features'].to(device)
@@ -243,20 +265,27 @@ def train_epoch(model, train_loader, optimizer, device):
         risk = model(features)
         loss = model.compute_loss(risk, time, event)
         
+        if torch.isnan(loss) or torch.isinf(loss):
+            continue
+            
         loss.backward()
+        
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         total_loss += loss.item()
+        n_batches += 1
     
-    return total_loss / len(train_loader)
+    return total_loss / max(n_batches, 1)
 
 
-def evaluate(model, dataset, indices, device):
-    """Evaluate model on dataset subset"""
+def evaluate_training(model, dataset, device):
+    """Evaluate model on full training data"""
     model.eval()
     
-    subset = Subset(dataset, indices)
-    loader = DataLoader(subset, batch_size=256, shuffle=False)
+    loader = DataLoader(dataset, batch_size=256, shuffle=False)
     
     all_risks = []
     all_times = []
@@ -265,34 +294,33 @@ def evaluate(model, dataset, indices, device):
     with torch.no_grad():
         for batch in loader:
             features = batch['features'].to(device)
-            time = batch['time']
-            event = batch['event']
-            
             risk = model(features)
             
             all_risks.append(risk.cpu().numpy())
-            all_times.append(time.numpy())
-            all_events.append(event.numpy())
+            all_times.append(batch['time'].numpy())
+            all_events.append(batch['event'].numpy())
     
     risks = np.concatenate(all_risks)
     times = np.concatenate(all_times)
     events = np.concatenate(all_events).astype(bool)
     
-    c_index = concordance_index(times, -risks, events) 
+    c_index = concordance_index(times, -risks, events)
     
     return c_index
 
 
 def pretrain_model(direction, source_expr, source_surv, source_params_file, 
-                   seed, output_dir, logger, device):
+                   target_params_file, n_features, seed, output_dir, logger, device):
     """
-    Pre-train model on source cohort.
+    Pre-train model on FULL source cohort.
     
     Args:
         direction: 'orien_to_tcga' or 'tcga_to_orien'
-        source_expr: Source cohort expression data
-        source_surv: Source cohort survival data
+        source_expr: Source cohort expression data (full cohort)
+        source_surv: Source cohort survival data (full cohort)
         source_params_file: Path to source cohort's best_params.json
+        target_params_file: Path to target cohort's best_params.json
+        n_features: Number of input features
         seed: Random seed
         output_dir: Output directory
         logger: Logger instance
@@ -303,145 +331,154 @@ def pretrain_model(direction, source_expr, source_surv, source_params_file,
     logger.info(f"Pre-training: {direction.upper()} - Seed {seed}")
     logger.info(f"{'='*60}")
     
-    # Create dataset
+    # Set random seeds
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    # Create dataset from FULL source cohort
     dataset = SurvivalDataset(source_expr, source_surv)
     
-    # Create train/validation split
-    train_idx, valid_idx = create_stratified_split(
-        dataset,
-        test_size=0.2,
-        random_state=seed
-    )
-    
-    logger.info(f"Split: Train={len(train_idx)}, Validation={len(valid_idx)}")
-    logger.info(f"  Train events: {dataset.y_event[train_idx].sum()}/{len(train_idx)} "
-                f"({100*dataset.y_event[train_idx].mean():.1f}%)")
-    logger.info(f"  Valid events: {dataset.y_event[valid_idx].sum()}/{len(valid_idx)} "
-                f"({100*dataset.y_event[valid_idx].mean():.1f}%)")
+    logger.info(f"Training on FULL source cohort: {len(dataset)} samples")
+    logger.info(f"  Events: {dataset.y_event.sum()}/{len(dataset)} "
+                f"({100*dataset.y_event.mean():.1f}%)")
     
     # Get model configuration
     config, batch_size, learning_rate = get_pretrain_config(
         direction,
         source_params_file,
-        n_features=len(dataset.gene_names)
+        target_params_file,
+        n_features
     )
     
-    logger.info(f"Model architecture: {config['hidden_sizes']}")
-    logger.info(f"Hyperparameters from SOURCE cohort:")
+    logger.info(f"\nModel Configuration:")
+    logger.info(f"  Architecture (from TARGET): {config['hidden_sizes']}")
+    logger.info(f"  Input features: {config['n_features']}")
+    logger.info(f"\nTraining Hyperparameters (from SOURCE):")
     logger.info(f"  Learning rate: {learning_rate:.6f}")
     logger.info(f"  Batch size: {batch_size}")
-    logger.info(f"  Dropout: {config['dropout']}")
+    logger.info(f"  Dropout: {config['dropout']:.4f}")
     logger.info(f"  Alpha: {config['alpha']:.6f}")
-    logger.info(f"  L1 ratio: {config['l1_ratio']}")
+    logger.info(f"  L1 ratio: {config['l1_ratio']:.4f}")
     logger.info(f"  Batch norm: {config['batch_norm']}")
+    logger.info(f"  Activation: {config['activation']}")
     
     # Initialize model
     model = ElasticDeepSurv(**config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
-    # Create train loader
-    train_dataset = Subset(dataset, train_idx)
-    train_events = dataset.y_event[train_idx]
+    # Count parameters
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"  Total parameters: {n_params:,}")
     
-    # Use stratified batch sampler for large cohorts, simple shuffle for small
-    n_samples = len(train_idx)
+    # Create data loader
+    events = dataset.y_event
+    n_samples = len(dataset)
+    
+    # Use stratified batch sampler for larger cohorts
     if n_samples >= 500:
-        logger.info("Using StratifiedBatchSampler (large cohort)")
+        logger.info("\nUsing StratifiedBatchSampler")
         train_batch_sampler = StratifiedBatchSampler(
-            events=train_events,
+            events=events,
             batch_size=batch_size,
             min_events_per_batch=2,
             shuffle=True,
             drop_last=False
         )
-        train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler)
+        train_loader = DataLoader(dataset, batch_sampler=train_batch_sampler)
     else:
-        logger.info("Using simple random shuffling (small cohort)")
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        logger.info("\nUsing simple random shuffling (smaller cohort)")
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
-    # Training loop with early stopping
-    best_valid_cindex = 0.0
-    best_epoch = 0
-    patience = 20
-    patience_counter = 0
+    # Training parameters
     max_epochs = 100
+    convergence_threshold = 0.001
+    patience = 20
     
+    logger.info(f"\nTraining Settings:")
+    logger.info(f"  Max epochs: {max_epochs}")
+    logger.info(f"  Convergence threshold: {convergence_threshold}")
+    logger.info(f"  Patience: {patience} epochs")
+    
+    # Training loop with convergence-based stopping
     training_history = []
+    best_loss = float('inf')
+    epochs_without_improvement = 0
+    converged_epoch = None
     
-    logger.info(f"\nStarting pre-training (max {max_epochs} epochs, patience {patience})...")
+    logger.info(f"\nStarting pre-training...")
     
     for epoch in range(max_epochs):
         train_loss = train_epoch(model, train_loader, optimizer, device)
-        train_cindex = evaluate(model, dataset, train_idx, device)
-        valid_cindex = evaluate(model, dataset, valid_idx, device)
+        train_cindex = evaluate_training(model, dataset, device)
         
         training_history.append({
             'epoch': epoch + 1,
             'train_loss': float(train_loss),
-            'train_cindex': float(train_cindex),
-            'valid_cindex': float(valid_cindex)
+            'train_cindex': float(train_cindex)
         })
         
-        # Check for improvement
-        if valid_cindex > best_valid_cindex:
-            best_valid_cindex = valid_cindex
-            best_epoch = epoch + 1
-            patience_counter = 0
-            
-            # Save best model
-            best_model_state = model.state_dict().copy()
-            
-            logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
-                       f"Train C-index={train_cindex:.4f}, "
-                       f"Valid C-index={valid_cindex:.4f} *** NEW BEST ***")
-        else:
-            patience_counter += 1
+        # Check for convergence
+        loss_improvement = best_loss - train_loss
+        
+        if loss_improvement > convergence_threshold:
+            best_loss = train_loss
+            epochs_without_improvement = 0
             
             if (epoch + 1) % 10 == 0:
                 logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
-                           f"Train C-index={train_cindex:.4f}, "
-                           f"Valid C-index={valid_cindex:.4f} "
-                           f"(patience: {patience_counter}/{patience})")
+                           f"C-index={train_cindex:.4f}")
+        else:
+            epochs_without_improvement += 1
             
-            if patience_counter >= patience:
-                logger.info(f"\nEarly stopping triggered at epoch {epoch+1}")
-                logger.info(f"Best validation C-index: {best_valid_cindex:.4f} at epoch {best_epoch}")
+            if (epoch + 1) % 10 == 0:
+                logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
+                           f"C-index={train_cindex:.4f} "
+                           f"(no improvement: {epochs_without_improvement}/{patience})")
+            
+            if epochs_without_improvement >= patience:
+                converged_epoch = epoch + 1 - patience
+                logger.info(f"\nConverged at epoch {converged_epoch} "
+                           f"(stopped at epoch {epoch+1})")
                 break
     
-    # Restore best model
-    model.load_state_dict(best_model_state)
+    if converged_epoch is None:
+        converged_epoch = max_epochs
+        logger.info(f"\nReached max epochs ({max_epochs})")
+    
+    # Add convergence info to history
+    if training_history:
+        training_history[-1]['converged_epoch'] = converged_epoch
     
     # Final evaluation
-    final_train_cindex = evaluate(model, dataset, train_idx, device)
-    final_valid_cindex = evaluate(model, dataset, valid_idx, device)
+    final_train_cindex = evaluate_training(model, dataset, device)
+    final_train_loss = training_history[-1]['train_loss'] if training_history else 0.0
     
     logger.info(f"\nPre-training Complete:")
-    logger.info(f"  Best epoch: {best_epoch}")
+    logger.info(f"  Final epoch: {len(training_history)}")
+    logger.info(f"  Converged at epoch: {converged_epoch}")
+    logger.info(f"  Final train loss: {final_train_loss:.4f}")
     logger.info(f"  Final train C-index: {final_train_cindex:.4f}")
-    logger.info(f"  Final valid C-index: {final_valid_cindex:.4f}")
     
-    
-    if training_history:  # Only plot if we have history
+    # Plot training curves
+    if training_history:
         plot_training_curves(
             training_history,
-            output_dir / f'seed{seed}_pretraining_curve.png',
-            f'{direction.upper()} Seed {seed}',
-            show_validation=True
+            output_dir / f'seed{seed}_training_curve.png',
+            f'{direction.upper()} Seed {seed}'
         )
-        logger.info(f"Saved training curve to {output_dir / f'seed{seed}_pretraining_curve.png'}")
-        
+        logger.info(f"Saved training curve to {output_dir / f'seed{seed}_training_curve.png'}")
+    
     # Save results
     results = {
         'direction': direction,
         'seed': seed,
-        'best_epoch': best_epoch,
-        'best_valid_cindex': float(best_valid_cindex),
+        'n_samples': len(dataset),
+        'n_events': int(dataset.y_event.sum()),
+        'n_features': n_features,
+        'converged_epoch': converged_epoch,
+        'total_epochs': len(training_history),
+        'final_train_loss': float(final_train_loss),
         'final_train_cindex': float(final_train_cindex),
-        'final_valid_cindex': float(final_valid_cindex),
-        'n_train': len(train_idx),
-        'n_valid': len(valid_idx),
-        'n_train_events': int(train_events.sum()),
-        'n_valid_events': int(dataset.y_event[valid_idx].sum()),
         'architecture': config['hidden_sizes'],
         'hyperparameters': {
             'learning_rate': learning_rate,
@@ -449,9 +486,14 @@ def pretrain_model(direction, source_expr, source_surv, source_params_file,
             'dropout': config['dropout'],
             'alpha': config['alpha'],
             'l1_ratio': config['l1_ratio'],
-            'batch_norm': config['batch_norm']
+            'batch_norm': config['batch_norm'],
+            'activation': config['activation']
         },
-        'training_history': training_history
+        'training_settings': {
+            'max_epochs': max_epochs,
+            'convergence_threshold': convergence_threshold,
+            'patience': patience
+        }
     }
     
     # Save results JSON
@@ -468,11 +510,12 @@ def pretrain_model(direction, source_expr, source_surv, source_params_file,
         'config': config,
         'seed': seed,
         'direction': direction,
-        'best_epoch': best_epoch,
-        'best_valid_cindex': best_valid_cindex
-    }, output_dir / f'seed{seed}_pretrain_model.pth')
+        'converged_epoch': converged_epoch,
+        'final_train_cindex': final_train_cindex,
+        'n_features': n_features
+    }, output_dir / f'seed{seed}_pretrained_model.pth')
     
-    logger.info(f"Saved pre-trained model to {output_dir / f'seed{seed}_pretrain_model.pth'}")
+    logger.info(f"Saved pre-trained model to {output_dir / f'seed{seed}_pretrained_model.pth'}")
     
     return results
 
@@ -489,35 +532,48 @@ def aggregate_results(output_dir, direction, logger):
         with open(seed_file, 'r') as f:
             results.append(json.load(f))
     
+    if not results:
+        logger.warning("No results found to aggregate")
+        return None
+    
     # Create summary DataFrame
     df = pd.DataFrame(results)
     
     summary = {
         'direction': direction,
         'n_seeds': len(results),
-        'mean_valid_cindex': df['best_valid_cindex'].mean(),
-        'std_valid_cindex': df['best_valid_cindex'].std(),
-        'min_valid_cindex': df['best_valid_cindex'].min(),
-        'max_valid_cindex': df['best_valid_cindex'].max(),
-        'mean_best_epoch': df['best_epoch'].mean()
+        'mean_train_cindex': df['final_train_cindex'].mean(),
+        'std_train_cindex': df['final_train_cindex'].std(),
+        'min_train_cindex': df['final_train_cindex'].min(),
+        'max_train_cindex': df['final_train_cindex'].max(),
+        'mean_converged_epoch': df['converged_epoch'].mean(),
+        'mean_train_loss': df['final_train_loss'].mean()
     }
     
     # Print summary
     logger.info(f"\n{direction.upper()} Pre-training Summary:")
-    logger.info(f"  Validation C-index: {summary['mean_valid_cindex']:.4f} ± {summary['std_valid_cindex']:.4f}")
-    logger.info(f"  Range: {summary['min_valid_cindex']:.4f} - {summary['max_valid_cindex']:.4f}")
-    logger.info(f"  Average best epoch: {summary['mean_best_epoch']:.1f}")
+    logger.info(f"  Training C-index: {summary['mean_train_cindex']:.4f} ± {summary['std_train_cindex']:.4f}")
+    logger.info(f"  Range: {summary['min_train_cindex']:.4f} - {summary['max_train_cindex']:.4f}")
+    logger.info(f"  Average convergence epoch: {summary['mean_converged_epoch']:.1f}")
+    logger.info(f"  Average final loss: {summary['mean_train_loss']:.4f}")
+    
+    # Save summary
+    with open(output_dir / 'summary.json', 'w') as f:
+        json.dump(summary, f, indent=2)
     
     return summary
 
 
 def main():
-    # Configuration
+    # Configuration for k=155 (87 consensus genes)
     SEEDS = [42, 123, 456, 789, 1011]
-    CONSENSUS_GENES_FILE = "results_v2/02_biomarker_discovery/ksweep_analysis/gene_lists/k120_consensus.txt"
-    TCGA_PARAMS_FILE = "results_v2/01_hyperparameter_tuning/tcga_308genes/best_params.json"
-    ORIEN_PARAMS_FILE = "results_v2/01_hyperparameter_tuning/orien_308genes/best_params.json"
-    BASE_OUTPUT_DIR = Path("results_v2/03_transfer_learning/pretraining")
+    K_VALUE = 155
+    
+    # File paths for k=155
+    CONSENSUS_GENES_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/consensus_genes/consensus_genes.txt"
+    TCGA_PARAMS_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/hyperparameter_tuning/tcga/best_params.json"
+    ORIEN_PARAMS_FILE = f"results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/hyperparameter_tuning/orien/best_params.json"
+    BASE_OUTPUT_DIR = Path(f"results_v2/03_transfer_learning/k{K_VALUE}/pretrained")
     
     # Setup
     BASE_OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
@@ -526,27 +582,61 @@ def main():
     print("="*60)
     print("Step 3.2: Pre-training Phase")
     print("="*60)
+    print(f"K-value: {K_VALUE}")
     print(f"Seeds: {SEEDS}")
     print(f"Device: {device}")
     print(f"Output: {BASE_OUTPUT_DIR}")
     
+    # Verify input files exist
+    for filepath, desc in [
+        (CONSENSUS_GENES_FILE, "Consensus genes"),
+        (TCGA_PARAMS_FILE, "TCGA hyperparameters"),
+        (ORIEN_PARAMS_FILE, "ORIEN hyperparameters")
+    ]:
+        if not Path(filepath).exists():
+            raise FileNotFoundError(f"{desc} not found: {filepath}")
+        print(f"✓ Found {desc}: {filepath}")
+    
     # Load consensus genes
     consensus_genes = load_consensus_genes(CONSENSUS_GENES_FILE)
-    print(f"\nLoaded {len(consensus_genes)} consensus genes from k=120")
+    print(f"\nLoaded {len(consensus_genes)} consensus genes from k={K_VALUE}")
+    
+    # Setup initial logger for data loading
+    data_logger = logging.getLogger('data_loader')
+    data_logger.setLevel(logging.INFO)
+    if not data_logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        data_logger.addHandler(ch)
     
     # Load data
     print("\nLoading data...")
-    data = load_data(consensus_genes, logging.getLogger('data_loader'))
+    data = load_data(consensus_genes, data_logger)
+    n_features = data['n_features']
+    print(f"Using {n_features} features")
     
     # Pre-train for both directions
     directions = [
-        ('orien_to_tcga', data['orien_expr'], data['orien_surv'], ORIEN_PARAMS_FILE),
-        ('tcga_to_orien', data['tcga_expr'], data['tcga_surv'], TCGA_PARAMS_FILE)
+        {
+            'name': 'orien_to_tcga',
+            'source_expr': data['orien_expr'],
+            'source_surv': data['orien_surv'],
+            'source_params': ORIEN_PARAMS_FILE,
+            'target_params': TCGA_PARAMS_FILE
+        },
+        {
+            'name': 'tcga_to_orien',
+            'source_expr': data['tcga_expr'],
+            'source_surv': data['tcga_surv'],
+            'source_params': TCGA_PARAMS_FILE,
+            'target_params': ORIEN_PARAMS_FILE
+        }
     ]
     
     all_summaries = []
     
-    for direction, source_expr, source_surv, source_params in directions:
+    for dir_config in directions:
+        direction = dir_config['name']
         output_dir = BASE_OUTPUT_DIR / direction
         output_dir.mkdir(exist_ok=True, parents=True)
         
@@ -559,9 +649,11 @@ def main():
             
             pretrain_model(
                 direction=direction,
-                source_expr=source_expr,
-                source_surv=source_surv,
-                source_params_file=source_params,
+                source_expr=dir_config['source_expr'],
+                source_surv=dir_config['source_surv'],
+                source_params_file=dir_config['source_params'],
+                target_params_file=dir_config['target_params'],
+                n_features=n_features,
                 seed=seed,
                 output_dir=output_dir,
                 logger=logger,
@@ -569,13 +661,23 @@ def main():
             )
         
         # Aggregate results for this direction
-        summary_logger = logging.getLogger(f'{direction}_summary')
+        summary_logger = setup_logging(output_dir, direction, 'summary')
         summary = aggregate_results(output_dir, direction, summary_logger)
-        all_summaries.append(summary)
+        if summary:
+            all_summaries.append(summary)
     
     # Save overall summary
-    summary_df = pd.DataFrame(all_summaries)
-    summary_df.to_csv(BASE_OUTPUT_DIR / 'pretraining_summary.csv', index=False)
+    if all_summaries:
+        summary_df = pd.DataFrame(all_summaries)
+        summary_df.to_csv(BASE_OUTPUT_DIR / 'pretraining_summary.csv', index=False)
+        
+        print(f"\n{'='*60}")
+        print("Pre-training Summary")
+        print(f"{'='*60}")
+        for summary in all_summaries:
+            print(f"\n{summary['direction'].upper()}:")
+            print(f"  Train C-index: {summary['mean_train_cindex']:.4f} ± {summary['std_train_cindex']:.4f}")
+            print(f"  Avg convergence: {summary['mean_converged_epoch']:.1f} epochs")
     
     print(f"\n{'='*60}")
     print("Step 3.2 Complete!")
