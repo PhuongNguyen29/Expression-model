@@ -6,6 +6,11 @@ This script uses the hyperparameter tuning results from Step 2 to:
 2. Generate summary statistics and select optimal k
 3. Create visualization figures
 
+Key features:
+- 80/20 split on source cohort for early stopping (training stability)
+- Multiple seeds [42, 123, 456, 789, 1011] for robust estimation
+- Reports mean ± std for all metrics
+
 Usage:
     python scripts/step2_2_cross_cohort_validation.py \
         --input_dir results_v2/02_biomarker_discovery/k_selection_with_tuning \
@@ -30,6 +35,7 @@ import json
 import yaml
 from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 from src.data.preprocessor import GeneExpressionPreprocessor
 from src.data.dataset import SurvivalDataset
@@ -39,6 +45,19 @@ from src.utils.batch_samplers import StratifiedBatchSampler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Seeds for reproducibility - same as transfer learning
+SEEDS = [42, 123, 456, 789, 1011]
+
+
+def set_seed(seed: int):
+    """Set all random seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def load_consensus_genes(k_dir: Path) -> List[str]:
@@ -63,17 +82,18 @@ def load_best_params(k_dir: Path, cohort: str) -> Dict:
         return json.load(f)
 
 
-def train_and_test_direction(
+def train_and_test_direction_single_seed(
     source_cohort: str,
     target_cohort: str,
     source_params: Dict,
     consensus_genes: List[str],
     data_dir: Path,
     config: dict,
+    seed: int,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 ) -> Dict:
     """
-    Train on source (full cohort) → Test on target (full cohort).
+    Train on source (with 80/20 split for early stopping) → Test on target.
     
     Args:
         source_cohort: 'tcga' or 'orien'
@@ -82,12 +102,15 @@ def train_and_test_direction(
         consensus_genes: List of consensus genes
         data_dir: Data directory path
         config: Configuration dict
+        seed: Random seed for reproducibility
         device: 'cuda' or 'cpu'
         
     Returns:
-        Dict with train and test C-indices
+        Dict with train, val, and test C-indices
     """
-    logger.info(f"\n--- Training: {source_cohort.upper()} → Testing: {target_cohort.upper()} ---")
+    set_seed(seed)
+    
+    logger.info(f"\n--- Seed {seed}: Training {source_cohort.upper()} → Testing {target_cohort.upper()} ---")
     
     # Parse hyperparameters from source tuning
     best_params = source_params['best_params']
@@ -111,9 +134,6 @@ def train_and_test_direction(
     batch_norm = best_params['batch_norm']
     weight_init = best_params.get('weight_init', 'kaiming_normal')
     
-    logger.info(f"Using architecture: {hidden_sizes}")
-    logger.info(f"Using hyperparameters from {source_cohort} tuning")
-    
     # Load RAW data for both cohorts
     tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
     orien_expr_raw = pd.read_csv(data_dir / "raw" / "orien_batch_corrected.csv", index_col=0)
@@ -124,60 +144,87 @@ def train_and_test_direction(
     tcga_expr_raw = tcga_expr_raw.loc[consensus_genes]
     orien_expr_raw = orien_expr_raw.loc[consensus_genes]
     
-    logger.info(f"TCGA: {tcga_expr_raw.shape[0]} genes × {tcga_expr_raw.shape[1]} samples")
-    logger.info(f"ORIEN: {orien_expr_raw.shape[0]} genes × {orien_expr_raw.shape[1]} samples")
-    
-    # Preprocess BOTH cohorts
-    preprocessor = GeneExpressionPreprocessor(config)
-    
+    # Determine source and target data
     if source_cohort.lower() == 'tcga':
-        source_processed = preprocessor.fit_transform_single_cohort(
-            tcga_expr_raw,
-            cohort_name='TCGA'
-        )
-        target_processed = preprocessor.transform_single_cohort(orien_expr_raw)
+        source_expr_raw = tcga_expr_raw
         source_surv = tcga_surv
+        target_expr_raw = orien_expr_raw
         target_surv = orien_surv
-    else:  # source is ORIEN
-        source_processed = preprocessor.fit_transform_single_cohort(
-            orien_expr_raw,
-            cohort_name='ORIEN'
-        )
-        target_processed = preprocessor.transform_single_cohort(tcga_expr_raw)
+    else:
+        source_expr_raw = orien_expr_raw
         source_surv = orien_surv
+        target_expr_raw = tcga_expr_raw
         target_surv = tcga_surv
     
+    # Split source into 80% train, 20% validation for early stopping
+    source_samples = source_expr_raw.columns.tolist()
+    source_events = source_surv.loc[source_samples, 'event'].values
+    
+    train_samples, val_samples = train_test_split(
+        source_samples,
+        test_size=0.2,
+        random_state=seed,
+        stratify=source_events
+    )
+    
+    logger.info(f"Source split: {len(train_samples)} train, {len(val_samples)} validation")
+    
+    # Extract train and validation data
+    train_expr_raw = source_expr_raw[train_samples]
+    val_expr_raw = source_expr_raw[val_samples]
+    train_surv = source_surv.loc[train_samples]
+    val_surv = source_surv.loc[val_samples]
+    
+    # Preprocess: fit on train, transform val and target
+    preprocessor = GeneExpressionPreprocessor(config)
+    
+    train_processed = preprocessor.fit_transform_single_cohort(
+        train_expr_raw,
+        cohort_name=f'{source_cohort}_train'
+    )
+    val_processed = preprocessor.transform_single_cohort(val_expr_raw)
+    target_processed = preprocessor.transform_single_cohort(target_expr_raw)
+    
     logger.info(f"After preprocessing:")
-    logger.info(f"  Source: {source_processed.shape[0]} genes × {source_processed.shape[1]} samples")
+    logger.info(f"  Train: {train_processed.shape[0]} genes × {train_processed.shape[1]} samples")
+    logger.info(f"  Val: {val_processed.shape[0]} genes × {val_processed.shape[1]} samples")
     logger.info(f"  Target: {target_processed.shape[0]} genes × {target_processed.shape[1]} samples")
     
     # Create datasets
-    source_dataset = SurvivalDataset(source_processed, source_surv)
+    train_dataset = SurvivalDataset(train_processed, train_surv)
+    val_dataset = SurvivalDataset(val_processed, val_surv)
     target_dataset = SurvivalDataset(target_processed, target_surv)
     
-    # Create dataloaders - use simple shuffle for small datasets
-    n_source_samples = len(source_dataset)
+    # Create dataloaders
+    n_train_samples = len(train_dataset)
+    train_events = train_surv['event'].values
     
-    if n_source_samples < 500:  # TCGA - use simple shuffle
-        source_loader = DataLoader(
-            source_dataset,
+    if n_train_samples < 400:  # Small dataset - use simple shuffle
+        train_loader = DataLoader(
+            train_dataset,
             batch_size=batch_size,
             shuffle=True,
             num_workers=0
         )
-    else:  # ORIEN - use stratified sampling
-        source_events = source_surv['event'].values
-        source_sampler = StratifiedBatchSampler(
-            events=source_events,
+    else:  # Larger dataset - use stratified sampling
+        train_sampler = StratifiedBatchSampler(
+            events=train_events,
             batch_size=batch_size,
             min_events_per_batch=2,
             shuffle=True
         )
-        source_loader = DataLoader(
-            source_dataset,
-            batch_sampler=source_sampler,
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
             num_workers=0
         )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0
+    )
     
     target_loader = DataLoader(
         target_dataset,
@@ -187,7 +234,7 @@ def train_and_test_direction(
     )
     
     # Create model
-    n_features = source_processed.shape[0]
+    n_features = train_processed.shape[0]
     model = ElasticDeepSurv(
         n_features=n_features,
         hidden_sizes=hidden_sizes,
@@ -199,8 +246,6 @@ def train_and_test_direction(
         alpha=alpha
     )
     
-    logger.info(f"Model created: {n_features} → {hidden_sizes} → 1")
-    
     # Create trainer
     trainer = ElasticDeepSurvTrainer(
         model=model,
@@ -208,35 +253,106 @@ def train_and_test_direction(
         device=device
     )
     
-    # Train on source (full cohort)
-    logger.info(f"Training on {source_cohort.upper()} (full cohort: {len(source_dataset)} samples)...")
-    
+    # Train with early stopping
     history = trainer.fit(
-        train_loader=source_loader,
-        valid_loader=None,  # No validation set
+        train_loader=train_loader,
+        valid_loader=val_loader,
         n_epochs=100,
-        early_stopping_patience=None,  # No early stopping
+        early_stopping_patience=20,
         verbose=False
     )
     
-    # Get training performance
-    _, _, _, train_cindex = trainer.evaluate(source_loader)
-    logger.info(f"  Training C-index on {source_cohort.upper()}: {train_cindex:.4f}")
-    
-    # Test on target
-    logger.info(f"Testing on {target_cohort.upper()} (full cohort: {len(target_dataset)} samples)...")
+    # Evaluate on all sets
+    _, _, _, train_cindex = trainer.evaluate(train_loader)
+    _, _, _, val_cindex = trainer.evaluate(val_loader)
     _, _, _, test_cindex = trainer.evaluate(target_loader)
-    logger.info(f"  Test C-index on {target_cohort.upper()}: {test_cindex:.4f}")
+    
+    logger.info(f"  Train C-index: {train_cindex:.4f}")
+    logger.info(f"  Val C-index: {val_cindex:.4f}")
+    logger.info(f"  Test C-index (target): {test_cindex:.4f}")
     
     return {
+        'seed': seed,
         'source': source_cohort,
         'target': target_cohort,
         'train_cindex': train_cindex,
+        'val_cindex': val_cindex,
         'test_cindex': test_cindex,
         'architecture': hidden_sizes,
-        'n_source_samples': len(source_dataset),
-        'n_target_samples': len(target_dataset)
+        'n_train_samples': len(train_dataset),
+        'n_val_samples': len(val_dataset),
+        'n_target_samples': len(target_dataset),
+        'best_epoch': history.get('best_epoch', None)
     }
+
+
+def train_and_test_direction_multi_seed(
+    source_cohort: str,
+    target_cohort: str,
+    source_params: Dict,
+    consensus_genes: List[str],
+    data_dir: Path,
+    config: dict,
+    seeds: List[int] = SEEDS,
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+) -> Dict:
+    """
+    Run training/testing across multiple seeds and aggregate results.
+    """
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Direction: {source_cohort.upper()} → {target_cohort.upper()}")
+    logger.info(f"Running {len(seeds)} seeds: {seeds}")
+    logger.info(f"{'='*60}")
+    
+    all_results = []
+    
+    for seed in seeds:
+        try:
+            result = train_and_test_direction_single_seed(
+                source_cohort=source_cohort,
+                target_cohort=target_cohort,
+                source_params=source_params,
+                consensus_genes=consensus_genes,
+                data_dir=data_dir,
+                config=config,
+                seed=seed,
+                device=device
+            )
+            all_results.append(result)
+        except Exception as e:
+            logger.error(f"Seed {seed} failed: {e}")
+            continue
+    
+    if not all_results:
+        raise RuntimeError(f"All seeds failed for {source_cohort} → {target_cohort}")
+    
+    # Aggregate results
+    train_cindices = [r['train_cindex'] for r in all_results]
+    val_cindices = [r['val_cindex'] for r in all_results]
+    test_cindices = [r['test_cindex'] for r in all_results]
+    
+    aggregated = {
+        'source': source_cohort,
+        'target': target_cohort,
+        'n_seeds': len(all_results),
+        'seeds_used': [r['seed'] for r in all_results],
+        'train_cindex_mean': float(np.mean(train_cindices)),
+        'train_cindex_std': float(np.std(train_cindices)),
+        'val_cindex_mean': float(np.mean(val_cindices)),
+        'val_cindex_std': float(np.std(val_cindices)),
+        'test_cindex_mean': float(np.mean(test_cindices)),
+        'test_cindex_std': float(np.std(test_cindices)),
+        'test_cindices_all': test_cindices,
+        'architecture': all_results[0]['architecture'],
+        'per_seed_results': all_results
+    }
+    
+    logger.info(f"\nAggregated Results ({source_cohort.upper()} → {target_cohort.upper()}):")
+    logger.info(f"  Train C-index: {aggregated['train_cindex_mean']:.4f} ± {aggregated['train_cindex_std']:.4f}")
+    logger.info(f"  Val C-index: {aggregated['val_cindex_mean']:.4f} ± {aggregated['val_cindex_std']:.4f}")
+    logger.info(f"  Test C-index: {aggregated['test_cindex_mean']:.4f} ± {aggregated['test_cindex_std']:.4f}")
+    
+    return aggregated
 
 
 def cross_cohort_validation(
@@ -245,10 +361,11 @@ def cross_cohort_validation(
     orien_params: Dict,
     k: int,
     output_dir: Path,
-    data_dir: Path
+    data_dir: Path,
+    seeds: List[int] = SEEDS
 ) -> Dict:
     """
-    Cross-cohort validation using optimal hyperparameters.
+    Cross-cohort validation using optimal hyperparameters with multiple seeds.
     
     Performs bidirectional validation:
     1. Train ORIEN → Test TCGA
@@ -256,6 +373,7 @@ def cross_cohort_validation(
     """
     logger.info(f"\n{'='*60}")
     logger.info(f"Cross-Cohort Validation (k={k}, m={len(consensus_genes)})")
+    logger.info(f"Seeds: {seeds}")
     logger.info(f"{'='*60}")
     
     # Create output directory
@@ -272,72 +390,97 @@ def cross_cohort_validation(
     config['data']['standardize'] = True
     
     # Direction 1: ORIEN → TCGA
-    logger.info("\n" + "="*60)
-    logger.info("Direction 1: ORIEN → TCGA")
-    logger.info("="*60)
-    
-    o2t_results = train_and_test_direction(
+    o2t_results = train_and_test_direction_multi_seed(
         source_cohort='orien',
         target_cohort='tcga',
         source_params=orien_params,
         consensus_genes=consensus_genes,
         data_dir=data_dir,
-        config=config
+        config=config,
+        seeds=seeds
     )
     
     # Direction 2: TCGA → ORIEN
-    logger.info("\n" + "="*60)
-    logger.info("Direction 2: TCGA → ORIEN")
-    logger.info("="*60)
-    
-    t2o_results = train_and_test_direction(
+    t2o_results = train_and_test_direction_multi_seed(
         source_cohort='tcga',
         target_cohort='orien',
         source_params=tcga_params,
         consensus_genes=consensus_genes,
         data_dir=data_dir,
-        config=config
+        config=config,
+        seeds=seeds
     )
     
     # Calculate bidirectional statistics
-    o2t_cindex = o2t_results['test_cindex']
-    t2o_cindex = t2o_results['test_cindex']
-    mean_cindex = (o2t_cindex + t2o_cindex) / 2
+    o2t_mean = o2t_results['test_cindex_mean']
+    o2t_std = o2t_results['test_cindex_std']
+    t2o_mean = t2o_results['test_cindex_mean']
+    t2o_std = t2o_results['test_cindex_std']
+    
+    # Mean bidirectional (average of the two directions)
+    mean_bidirectional = (o2t_mean + t2o_mean) / 2
+    # Propagate uncertainty: std of average
+    mean_bidirectional_std = np.sqrt((o2t_std**2 + t2o_std**2) / 4)
     
     # Compile results
     summary = {
         'k': k,
         'm': len(consensus_genes),
+        'n_seeds': len(seeds),
+        'seeds': seeds,
         'orien_to_tcga': {
-            'train_cindex': o2t_results['train_cindex'],
-            'test_cindex': o2t_results['test_cindex'],
-            'architecture': o2t_results['architecture']
+            'test_cindex_mean': o2t_mean,
+            'test_cindex_std': o2t_std,
+            'train_cindex_mean': o2t_results['train_cindex_mean'],
+            'val_cindex_mean': o2t_results['val_cindex_mean'],
+            'architecture': o2t_results['architecture'],
+            'all_test_cindices': o2t_results['test_cindices_all']
         },
         'tcga_to_orien': {
-            'train_cindex': t2o_results['train_cindex'],
-            'test_cindex': t2o_results['test_cindex'],
-            'architecture': t2o_results['architecture']
+            'test_cindex_mean': t2o_mean,
+            'test_cindex_std': t2o_std,
+            'train_cindex_mean': t2o_results['train_cindex_mean'],
+            'val_cindex_mean': t2o_results['val_cindex_mean'],
+            'architecture': t2o_results['architecture'],
+            'all_test_cindices': t2o_results['test_cindices_all']
         },
-        'orien_to_tcga_cindex': o2t_cindex,
-        'tcga_to_orien_cindex': t2o_cindex,
-        'mean_bidirectional_cindex': mean_cindex,
+        'mean_bidirectional_cindex': mean_bidirectional,
+        'mean_bidirectional_std': mean_bidirectional_std,
         'timestamp': datetime.now().isoformat()
     }
     
-    # Save results
+    # Save detailed results
     with open(validation_dir / 'results.json', 'w') as f:
         json.dump(summary, f, indent=2)
+    
+    # Save per-seed results for reproducibility
+    per_seed_df = pd.DataFrame([
+        {
+            'seed': r['seed'],
+            'direction': 'orien_to_tcga',
+            'train_cindex': r['train_cindex'],
+            'val_cindex': r['val_cindex'],
+            'test_cindex': r['test_cindex']
+        }
+        for r in o2t_results['per_seed_results']
+    ] + [
+        {
+            'seed': r['seed'],
+            'direction': 'tcga_to_orien',
+            'train_cindex': r['train_cindex'],
+            'val_cindex': r['val_cindex'],
+            'test_cindex': r['test_cindex']
+        }
+        for r in t2o_results['per_seed_results']
+    ])
+    per_seed_df.to_csv(validation_dir / 'per_seed_results.csv', index=False)
     
     logger.info(f"\n{'='*60}")
     logger.info("Cross-Cohort Validation Results:")
     logger.info(f"{'='*60}")
-    logger.info(f"  ORIEN → TCGA:")
-    logger.info(f"    Train C-index: {o2t_results['train_cindex']:.4f}")
-    logger.info(f"    Test C-index:  {o2t_cindex:.4f}")
-    logger.info(f"  TCGA → ORIEN:")
-    logger.info(f"    Train C-index: {t2o_results['train_cindex']:.4f}")
-    logger.info(f"    Test C-index:  {t2o_cindex:.4f}")
-    logger.info(f"  Mean Bidirectional: {mean_cindex:.4f}")
+    logger.info(f"  ORIEN → TCGA: {o2t_mean:.4f} ± {o2t_std:.4f}")
+    logger.info(f"  TCGA → ORIEN: {t2o_mean:.4f} ± {t2o_std:.4f}")
+    logger.info(f"  Mean Bidirectional: {mean_bidirectional:.4f} ± {mean_bidirectional_std:.4f}")
     logger.info(f"{'='*60}\n")
     logger.info(f"Results saved to: {validation_dir}")
     
@@ -349,7 +492,7 @@ def create_summary_figures(summary_df: pd.DataFrame, output_dir: Path):
     fig_dir = output_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     
-    # Figure 1: C-index vs k-value
+    # Figure 1: C-index vs k-value with error bars
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     # Left: CV C-index by cohort
@@ -365,17 +508,23 @@ def create_summary_figures(summary_df: pd.DataFrame, output_dir: Path):
     ax1.grid(True, alpha=0.3)
     ax1.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='Random')
     
-    # Right: Cross-cohort transfer
+    # Right: Cross-cohort transfer with error bars
     ax2 = axes[1]
-    ax2.plot(summary_df['k'], summary_df['orien_to_tcga_cindex'], 
-             'o-', label='ORIEN → TCGA', color='#2ca02c', linewidth=2, markersize=8)
-    ax2.plot(summary_df['k'], summary_df['tcga_to_orien_cindex'], 
-             's-', label='TCGA → ORIEN', color='#d62728', linewidth=2, markersize=8)
-    ax2.plot(summary_df['k'], summary_df['mean_bidirectional_cindex'], 
-             '^-', label='Mean Bidirectional', color='#9467bd', linewidth=2, markersize=8)
+    ax2.errorbar(summary_df['k'], summary_df['orien_to_tcga_mean'], 
+                 yerr=summary_df['orien_to_tcga_std'],
+                 fmt='o-', label='ORIEN → TCGA', color='#2ca02c', 
+                 linewidth=2, markersize=8, capsize=4)
+    ax2.errorbar(summary_df['k'], summary_df['tcga_to_orien_mean'], 
+                 yerr=summary_df['tcga_to_orien_std'],
+                 fmt='s-', label='TCGA → ORIEN', color='#d62728', 
+                 linewidth=2, markersize=8, capsize=4)
+    ax2.errorbar(summary_df['k'], summary_df['mean_bidirectional_cindex'], 
+                 yerr=summary_df['mean_bidirectional_std'],
+                 fmt='^-', label='Mean Bidirectional', color='#9467bd', 
+                 linewidth=2, markersize=8, capsize=4)
     ax2.set_xlabel('k (top genes per cohort)', fontsize=12)
     ax2.set_ylabel('Test C-index', fontsize=12)
-    ax2.set_title('Cross-Cohort Transfer Performance', fontsize=14)
+    ax2.set_title('Cross-Cohort Transfer Performance (mean ± std)', fontsize=14)
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
     ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
@@ -406,7 +555,7 @@ def create_summary_figures(summary_df: pd.DataFrame, output_dir: Path):
     plt.savefig(fig_dir / 'consensus_genes_vs_k.pdf', bbox_inches='tight')
     plt.close()
     
-    # Figure 3: Comprehensive summary
+    # Figure 3: Comprehensive summary with error bands
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
     # Top-left: Mean CV C-index
@@ -422,22 +571,19 @@ def create_summary_figures(summary_df: pd.DataFrame, output_dir: Path):
     ax.set_title('A. Within-Cohort CV Performance', fontsize=12)
     ax.grid(True, alpha=0.3)
     
-    # Top-right: Mean bidirectional transfer
+    # Top-right: Mean bidirectional transfer with error bars
     ax = axes[0, 1]
-    ax.plot(summary_df['k'], summary_df['mean_bidirectional_cindex'], 
-            'o-', color='#9467bd', linewidth=2, markersize=8)
-    ax.fill_between(summary_df['k'],
-                    summary_df[['orien_to_tcga_cindex', 'tcga_to_orien_cindex']].min(axis=1),
-                    summary_df[['orien_to_tcga_cindex', 'tcga_to_orien_cindex']].max(axis=1),
-                    alpha=0.3, color='#9467bd')
+    ax.errorbar(summary_df['k'], summary_df['mean_bidirectional_cindex'], 
+                yerr=summary_df['mean_bidirectional_std'],
+                fmt='o-', color='#9467bd', linewidth=2, markersize=8, capsize=4)
     ax.set_xlabel('k', fontsize=11)
     ax.set_ylabel('Mean Bidirectional C-index', fontsize=11)
-    ax.set_title('B. Cross-Cohort Transfer Performance', fontsize=12)
+    ax.set_title('B. Cross-Cohort Transfer Performance (mean ± std)', fontsize=12)
     ax.grid(True, alpha=0.3)
     
-    # Bottom-left: Cohort stability (difference between directions)
+    # Bottom-left: Direction stability (difference between directions)
     ax = axes[1, 0]
-    transfer_diff = abs(summary_df['orien_to_tcga_cindex'] - summary_df['tcga_to_orien_cindex'])
+    transfer_diff = abs(summary_df['orien_to_tcga_mean'] - summary_df['tcga_to_orien_mean'])
     ax.bar(summary_df['k'], transfer_diff, color='#ff7f0e', alpha=0.7)
     ax.set_xlabel('k', fontsize=11)
     ax.set_ylabel('|ORIEN→TCGA - TCGA→ORIEN|', fontsize=11)
@@ -501,11 +647,12 @@ def select_optimal_k(summary_df: pd.DataFrame) -> Dict:
         'k': int(summary_df.loc[best_transfer_idx, 'k']),
         'm': int(summary_df.loc[best_transfer_idx, 'm']),
         'mean_bidirectional_cindex': float(summary_df.loc[best_transfer_idx, 'mean_bidirectional_cindex']),
+        'mean_bidirectional_std': float(summary_df.loc[best_transfer_idx, 'mean_bidirectional_std']),
         'criterion': 'Highest mean bidirectional transfer C-index'
     }
     
     # Criterion 3: Best stability
-    transfer_diff = abs(summary_df['orien_to_tcga_cindex'] - summary_df['tcga_to_orien_cindex'])
+    transfer_diff = abs(summary_df['orien_to_tcga_mean'] - summary_df['tcga_to_orien_mean'])
     best_stability_idx = transfer_diff.idxmin()
     results['best_stability'] = {
         'k': int(summary_df.loc[best_stability_idx, 'k']),
@@ -529,6 +676,7 @@ def select_optimal_k(summary_df: pd.DataFrame) -> Dict:
         'combined_score': float(combined_score.loc[best_combined_idx]),
         'mean_cv_cindex': float(mean_cv.loc[best_combined_idx]),
         'mean_bidirectional_cindex': float(summary_df.loc[best_combined_idx, 'mean_bidirectional_cindex']),
+        'mean_bidirectional_std': float(summary_df.loc[best_combined_idx, 'mean_bidirectional_std']),
         'criterion': 'Combined score (CV + Transfer + Stability)'
     }
     
@@ -554,26 +702,25 @@ def main():
                         help='Data directory')
     parser.add_argument('--skip_validation', action='store_true',
                         help='Skip cross-cohort validation (use existing results)')
+    parser.add_argument('--seeds', nargs='+', type=int, default=SEEDS,
+                        help='Random seeds for multi-seed validation')
     
     args = parser.parse_args()
     
     input_dir = Path(args.input_dir)
     data_dir = Path(args.data_dir)
+    seeds = args.seeds
     
     logger.info("="*80)
     logger.info("STEP 2.2: CROSS-COHORT VALIDATION AND K-SELECTION ANALYSIS")
     logger.info("="*80)
     logger.info(f"Input directory: {input_dir}")
     logger.info(f"Data directory: {data_dir}")
+    logger.info(f"Seeds: {seeds}")
     
     # Find all k-value directories
     k_dirs = sorted([d for d in input_dir.iterdir() 
-                     if d.is_dir() and d.name.startswith('k') and d.name[1:].isdigit()])
-    
-    if not k_dirs:
-        # Try with 3-digit format (k080, k090, etc.)
-        k_dirs = sorted([d for d in input_dir.iterdir() 
-                         if d.is_dir() and d.name.startswith('k')])
+                     if d.is_dir() and d.name.startswith('k')])
     
     logger.info(f"Found {len(k_dirs)} k-value directories: {[d.name for d in k_dirs]}")
     
@@ -614,7 +761,8 @@ def main():
                     orien_params=orien_params,
                     k=k,
                     output_dir=input_dir,
-                    data_dir=data_dir
+                    data_dir=data_dir,
+                    seeds=seeds
                 )
             
             # Compile results
@@ -623,9 +771,12 @@ def main():
                 'm': len(consensus_genes),
                 'tcga_cv_cindex': tcga_params['best_cv_cindex'],
                 'orien_cv_cindex': orien_params['best_cv_cindex'],
-                'orien_to_tcga_cindex': validation_results['orien_to_tcga_cindex'],
-                'tcga_to_orien_cindex': validation_results['tcga_to_orien_cindex'],
-                'mean_bidirectional_cindex': validation_results['mean_bidirectional_cindex']
+                'orien_to_tcga_mean': validation_results['orien_to_tcga']['test_cindex_mean'],
+                'orien_to_tcga_std': validation_results['orien_to_tcga']['test_cindex_std'],
+                'tcga_to_orien_mean': validation_results['tcga_to_orien']['test_cindex_mean'],
+                'tcga_to_orien_std': validation_results['tcga_to_orien']['test_cindex_std'],
+                'mean_bidirectional_cindex': validation_results['mean_bidirectional_cindex'],
+                'mean_bidirectional_std': validation_results['mean_bidirectional_std']
             }
             
             all_results.append(k_results)
@@ -661,11 +812,14 @@ def main():
     logger.info(f"\nBest by CV performance: k={optimal_k_results['best_cv']['k']} "
                 f"(mean CV C-index: {optimal_k_results['best_cv']['mean_cv_cindex']:.4f})")
     logger.info(f"Best by transfer performance: k={optimal_k_results['best_transfer']['k']} "
-                f"(mean bidirectional: {optimal_k_results['best_transfer']['mean_bidirectional_cindex']:.4f})")
+                f"(mean bidirectional: {optimal_k_results['best_transfer']['mean_bidirectional_cindex']:.4f} "
+                f"± {optimal_k_results['best_transfer']['mean_bidirectional_std']:.4f})")
     logger.info(f"Best by stability: k={optimal_k_results['best_stability']['k']} "
                 f"(transfer diff: {optimal_k_results['best_stability']['transfer_difference']:.4f})")
     logger.info(f"\n*** RECOMMENDED: k={optimal_k_results['recommended']['k']} ***")
     logger.info(f"    Consensus genes (m): {optimal_k_results['recommended']['m']}")
+    logger.info(f"    Mean bidirectional C-index: {optimal_k_results['recommended']['mean_bidirectional_cindex']:.4f} "
+                f"± {optimal_k_results['recommended']['mean_bidirectional_std']:.4f}")
     logger.info(f"    {optimal_k_results['recommended']['rationale']}")
     
     # Create figures
