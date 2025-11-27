@@ -381,7 +381,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         train_loader = DataLoader(train_dataset, batch_size=target_batch_size, shuffle=True)
     
     # Fine-tuning settings
-    max_epochs = 100
+    max_epochs = 200
     patience = 20
     
     logger.info(f"\nFine-tuning Settings:")
@@ -425,12 +425,13 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
             best_model_state = model.state_dict().copy()
             epochs_without_improvement = 0
             
-            if (epoch + 1) % 10 == 0 or epoch == 0:
-                logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
-                           f"Train={train_cindex:.4f}, Test={test_cindex:.4f} *** BEST ***")
+            # Always log when there's a new best
+            logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
+                       f"Train={train_cindex:.4f}, Test={test_cindex:.4f} *** BEST ***")
         else:
             epochs_without_improvement += 1
             
+            # Only log non-improvements at epoch multiples of 10
             if (epoch + 1) % 10 == 0:
                 logger.info(f"Epoch {epoch+1:3d}: Loss={train_loss:.4f}, "
                            f"Train={train_cindex:.4f}, Test={test_cindex:.4f} "
