@@ -382,7 +382,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
     
     # Fine-tuning settings
     max_epochs = 200
-    patience = 20
+    patience = 30
     
     logger.info(f"\nFine-tuning Settings:")
     logger.info(f"  Max epochs: {max_epochs}")
