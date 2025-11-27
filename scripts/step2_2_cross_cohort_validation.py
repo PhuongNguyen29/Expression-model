@@ -262,14 +262,62 @@ def train_and_test_direction_single_seed(
         verbose=False
     )
     
-    # Evaluate on all sets
+    # Evaluate on all sets and collect risk scores
     _, _, _, train_cindex = trainer.evaluate(train_loader)
     _, _, _, val_cindex = trainer.evaluate(val_loader)
     _, _, _, test_cindex = trainer.evaluate(target_loader)
     
+    # Collect risk scores for verification
+    def get_risk_scores(model, data_loader, device):
+        """Extract risk scores and survival data for all samples."""
+        model.eval()
+        all_risks = []
+        all_times = []
+        all_events = []
+        all_indices = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(data_loader):
+                features = batch['features'].to(device)
+                times = batch['time'].cpu().numpy()
+                events = batch['event'].cpu().numpy()
+                
+                log_hazards = model(features)
+                risks = torch.exp(log_hazards).squeeze().cpu().numpy()
+                
+                # Handle single sample batches
+                if np.isscalar(risks):
+                    risks = np.array([risks])
+                if np.isscalar(times):
+                    times = np.array([times])
+                if np.isscalar(events):
+                    events = np.array([events])
+                
+                all_risks.extend(risks)
+                all_times.extend(times)
+                all_events.extend(events)
+        
+        return {
+            'risk_scores': np.array(all_risks),
+            'times': np.array(all_times),
+            'events': np.array(all_events)
+        }
+    
+    # Get risk scores for target cohort (the test set we care about)
+    target_risk_data = get_risk_scores(trainer.model, target_loader, trainer.device)
+    
+    # Verify C-index calculation
+    from lifelines.utils import concordance_index
+    verified_cindex = concordance_index(
+        target_risk_data['times'],
+        -target_risk_data['risk_scores'],  # Negative because higher risk = shorter survival
+        target_risk_data['events']
+    )
+    
     logger.info(f"  Train C-index: {train_cindex:.4f}")
     logger.info(f"  Val C-index: {val_cindex:.4f}")
     logger.info(f"  Test C-index (target): {test_cindex:.4f}")
+    logger.info(f"  Verified Test C-index: {verified_cindex:.4f}")
     
     return {
         'seed': seed,
@@ -278,11 +326,13 @@ def train_and_test_direction_single_seed(
         'train_cindex': train_cindex,
         'val_cindex': val_cindex,
         'test_cindex': test_cindex,
+        'verified_test_cindex': verified_cindex,
         'architecture': hidden_sizes,
         'n_train_samples': len(train_dataset),
         'n_val_samples': len(val_dataset),
         'n_target_samples': len(target_dataset),
-        'best_epoch': history.get('best_epoch', None)
+        'best_epoch': history.get('best_epoch', None),
+        'target_risk_data': target_risk_data  # For saving to file
     }
 
 
@@ -460,7 +510,8 @@ def cross_cohort_validation(
             'direction': 'orien_to_tcga',
             'train_cindex': r['train_cindex'],
             'val_cindex': r['val_cindex'],
-            'test_cindex': r['test_cindex']
+            'test_cindex': r['test_cindex'],
+            'verified_test_cindex': r.get('verified_test_cindex', None)
         }
         for r in o2t_results['per_seed_results']
     ] + [
@@ -469,11 +520,38 @@ def cross_cohort_validation(
             'direction': 'tcga_to_orien',
             'train_cindex': r['train_cindex'],
             'val_cindex': r['val_cindex'],
-            'test_cindex': r['test_cindex']
+            'test_cindex': r['test_cindex'],
+            'verified_test_cindex': r.get('verified_test_cindex', None)
         }
         for r in t2o_results['per_seed_results']
     ])
     per_seed_df.to_csv(validation_dir / 'per_seed_results.csv', index=False)
+    
+    # Save risk scores for verification
+    risk_scores_dir = validation_dir / 'risk_scores'
+    risk_scores_dir.mkdir(parents=True, exist_ok=True)
+    
+    for r in o2t_results['per_seed_results']:
+        if 'target_risk_data' in r:
+            seed = r['seed']
+            risk_df = pd.DataFrame({
+                'risk_score': r['target_risk_data']['risk_scores'],
+                'time': r['target_risk_data']['times'],
+                'event': r['target_risk_data']['events']
+            })
+            risk_df.to_csv(risk_scores_dir / f'orien_to_tcga_seed{seed}_risk_scores.csv', index=False)
+    
+    for r in t2o_results['per_seed_results']:
+        if 'target_risk_data' in r:
+            seed = r['seed']
+            risk_df = pd.DataFrame({
+                'risk_score': r['target_risk_data']['risk_scores'],
+                'time': r['target_risk_data']['times'],
+                'event': r['target_risk_data']['events']
+            })
+            risk_df.to_csv(risk_scores_dir / f'tcga_to_orien_seed{seed}_risk_scores.csv', index=False)
+    
+    logger.info(f"Risk scores saved to: {risk_scores_dir}")
     
     logger.info(f"\n{'='*60}")
     logger.info("Cross-Cohort Validation Results:")
