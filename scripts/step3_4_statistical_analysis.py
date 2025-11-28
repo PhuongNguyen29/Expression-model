@@ -76,7 +76,7 @@ def load_finetuning_results(finetune_dir):
                 results[direction].append({
                     'seed': data['seed'],
                     'test_cindex': data['finetune_test_cindex'],
-                    'pretrain_cindex': data['pretrain_valid_cindex']
+                    'pretrain_cindex': data.get('pretrain_train_cindex', data.get('pretrain_valid_cindex', 0))
                 })
     
     return results
@@ -440,16 +440,16 @@ def create_improvement_analysis(stats_orien_to_tcga, stats_tcga_to_orien, output
 
 def main():
     # Configuration
-    BASELINE2_DIR = Path("results_v2/03_transfer_learning/baseline2_target_only")
-    FINETUNE_DIR = Path("results_v2/03_transfer_learning/finetuning")
-    OUTPUT_DIR = Path("results_v2/03_transfer_learning/analysis")
+    BASELINE2_DIR = Path("results_v2/03_transfer_learning/k155/baseline_target_only")
+    FINETUNE_DIR = Path("results_v2/03_transfer_learning/k155/finetuned")
+    OUTPUT_DIR = Path("results_v2/03_transfer_learning/k155/analysis")
     
     # Zero-shot results from Step 2.2B (PLACEHOLDER - update with actual values)
     ZEROSHOT_RESULTS = {
-        'orien_to_tcga_mean': 0.6256,
-        'orien_to_tcga_std': 0.0131,
-        'tcga_to_orien_mean': 0.6093,
-        'tcga_to_orien_std': 0.0068
+        'orien_to_tcga_mean': 0.6236,  # From your fine-tune output
+        'orien_to_tcga_std': 0.0590,
+        'tcga_to_orien_mean': 0.6172,
+        'tcga_to_orien_std': 0.0347
     }
     
     # Setup
