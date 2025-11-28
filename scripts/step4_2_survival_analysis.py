@@ -24,8 +24,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from lifelines import KaplanMeierFitter, CoxPHFitter
 from lifelines.statistics import logrank_test
-from sksurv.metrics import cumulative_dynamic_auc
-from sksurv.util import Surv
+from sklearn.metrics import roc_curve, auc
 
 # Setup logging
 logging.basicConfig(
@@ -112,35 +111,44 @@ def calculate_hazard_ratio(durations, events, groups):
 
 def calculate_time_dependent_auc(durations, events, risk_scores, timepoint=60):
     """
-    Calculate time-dependent AUC at a specific timepoint using scikit-survival.
+    Calculate time-dependent AUC at a specific timepoint.
+    
+    Uses the incident/dynamic definition:
+    - Cases: patients who had event before or at timepoint
+    - Controls: patients who survived beyond timepoint
     
     Args:
         durations: survival times (months)
         events: event indicators (boolean)
-        risk_scores: predicted risk scores
+        risk_scores: predicted risk scores (higher = worse prognosis)
         timepoint: time at which to evaluate AUC (months)
     
     Returns:
         AUC value at the specified timepoint
     """
-    # Create structured array for scikit-survival
-    y_surv = Surv.from_arrays(event=events.astype(bool), time=durations)
+    # Define cases and controls at the timepoint
+    # Cases: experienced event by timepoint
+    cases_mask = events & (durations <= timepoint)
+    # Controls: still alive at timepoint (survived beyond timepoint)
+    controls_mask = durations > timepoint
     
-    # Filter to patients with follow-up >= timepoint or event before timepoint
-    # This ensures we have valid comparisons at the timepoint
-    valid_mask = (durations >= timepoint) | (events & (durations <= timepoint))
+    n_cases = cases_mask.sum()
+    n_controls = controls_mask.sum()
     
-    if valid_mask.sum() < 10:
-        logger.warning(f"Too few valid samples ({valid_mask.sum()}) for AUC calculation at {timepoint} months")
+    if n_cases < 5 or n_controls < 5:
+        logger.warning(f"Too few cases ({n_cases}) or controls ({n_controls}) for AUC at {timepoint} months")
         return np.nan
     
+    # Create binary outcome and select relevant samples
+    valid_mask = cases_mask | controls_mask
+    y_binary = cases_mask[valid_mask].astype(int)
+    scores_valid = risk_scores[valid_mask]
+    
     try:
-        # Calculate cumulative/dynamic AUC
-        times = np.array([timepoint])
-        auc, mean_auc = cumulative_dynamic_auc(
-            y_surv, y_surv, risk_scores, times
-        )
-        return float(auc[0])
+        # Calculate ROC curve and AUC
+        fpr, tpr, _ = roc_curve(y_binary, scores_valid)
+        auc_value = auc(fpr, tpr)
+        return float(auc_value)
     except Exception as e:
         logger.warning(f"AUC calculation failed: {e}")
         return np.nan
@@ -224,57 +232,36 @@ def plot_km_curve_single(ax, durations, events, groups, cohort_name, max_time=60
 
 def plot_roc_curve_single(ax, durations, events, risk_scores, cohort_name, timepoint=60):
     """
-    Plot time-dependent ROC curve at a specific timepoint.
+    Plot time-dependent ROC curve at a specific timepoint using sklearn.
     """
-    # Create structured array for scikit-survival
-    y_surv = Surv.from_arrays(event=events.astype(bool), time=durations)
-    
     try:
-        # Calculate ROC curve points using cumulative sensitivity/specificity
-        from sksurv.metrics import cumulative_dynamic_auc
+        # Define cases and controls at the timepoint
+        cases_mask = events & (durations <= timepoint)
+        controls_mask = durations > timepoint
         
-        # Calculate AUC
-        times = np.array([timepoint])
-        auc_values, mean_auc = cumulative_dynamic_auc(y_surv, y_surv, risk_scores, times)
-        auc = auc_values[0]
+        n_cases = cases_mask.sum()
+        n_controls = controls_mask.sum()
         
-        # Generate ROC curve manually using thresholds
-        thresholds = np.percentile(risk_scores, np.linspace(0, 100, 101))
-        tpr_list = []
-        fpr_list = []
+        if n_cases < 5 or n_controls < 5:
+            raise ValueError(f"Too few cases ({n_cases}) or controls ({n_controls})")
         
-        for thresh in thresholds:
-            predicted_high = risk_scores >= thresh
-            
-            # At timepoint: cases = events before timepoint, controls = alive at timepoint
-            cases_mask = events & (durations <= timepoint)
-            controls_mask = durations > timepoint
-            
-            if cases_mask.sum() > 0 and controls_mask.sum() > 0:
-                tpr = predicted_high[cases_mask].mean()  # Sensitivity
-                fpr = predicted_high[controls_mask].mean()  # 1 - Specificity
-                tpr_list.append(tpr)
-                fpr_list.append(fpr)
+        # Create binary outcome
+        valid_mask = cases_mask | controls_mask
+        y_binary = cases_mask[valid_mask].astype(int)
+        scores_valid = risk_scores[valid_mask]
         
-        # Sort by FPR for proper ROC curve
-        if len(fpr_list) > 0:
-            sorted_idx = np.argsort(fpr_list)
-            fpr_sorted = np.array(fpr_list)[sorted_idx]
-            tpr_sorted = np.array(tpr_list)[sorted_idx]
-            
-            # Add (0,0) and (1,1) points
-            fpr_sorted = np.concatenate([[0], fpr_sorted, [1]])
-            tpr_sorted = np.concatenate([[0], tpr_sorted, [1]])
-            
-            # Plot ROC curve
-            ax.plot(fpr_sorted, tpr_sorted, color='#3498db', linewidth=2)
+        # Calculate ROC curve
+        fpr, tpr, _ = roc_curve(y_binary, scores_valid)
+        auc_value = auc(fpr, tpr)
+        
+        # Plot ROC curve
+        ax.plot(fpr, tpr, color='#3498db', linewidth=2)
         
         # Diagonal reference line
         ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5)
         
         # Fill under curve
-        if len(fpr_list) > 0:
-            ax.fill_between(fpr_sorted, 0, tpr_sorted, alpha=0.1, color='#3498db')
+        ax.fill_between(fpr, 0, tpr, alpha=0.1, color='#3498db')
         
         # Styling
         ax.set_xlabel('1 - Specificity', fontsize=11, fontweight='bold')
@@ -285,20 +272,23 @@ def plot_roc_curve_single(ax, durations, events, risk_scores, cohort_name, timep
         ax.set_yticks([0, 0.25, 0.50, 0.75, 1.00])
         
         # AUC annotation
-        ax.text(0.95, 0.05, f'AUC = {auc:.3f}', transform=ax.transAxes,
+        ax.text(0.95, 0.05, f'AUC = {auc_value:.3f}', transform=ax.transAxes,
                 fontsize=11, verticalalignment='bottom', horizontalalignment='right',
                 fontweight='bold')
         
         ax.grid(True, alpha=0.3, linestyle='--')
         
-        return auc
+        return auc_value
         
     except Exception as e:
         logger.warning(f"ROC curve generation failed: {e}")
         ax.text(0.5, 0.5, 'ROC curve\nnot available', transform=ax.transAxes,
                 ha='center', va='center', fontsize=12)
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5)
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
+        ax.set_xlabel('1 - Specificity', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Sensitivity', fontsize=11, fontweight='bold')
         return np.nan
 
 
