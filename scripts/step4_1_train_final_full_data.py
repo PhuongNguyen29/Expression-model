@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
 Step 4.1: Train Final Models on Full Data
-- Train Cox regression, Target-only, and Transfer learning on FULL datasets
+
+Purpose: Train final transfer learning models on full datasets for survival analysis.
+
+Protocol:
+- TCGA model: Pretrain on full ORIEN → Fine-tune on full TCGA
+- ORIEN model: Pretrain on full TCGA → Fine-tune on full ORIEN
 - Extract risk scores for ALL patients
 - Calculate bootstrap-corrected C-index
-- Save models and risk scores for survival analysis
+- Save models and risk scores for Step 4.2 survival analysis
+
+Configuration: k=155 (87 consensus genes)
 """
 
 import sys
@@ -15,9 +22,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 from sklearn.utils import resample
-from lifelines.utils import concordance_index
-from lifelines import CoxPHFitter
 from lifelines.utils import concordance_index
 
 # Setup logging
@@ -36,39 +42,54 @@ from src.data.dataset import SurvivalDataset
 from src.utils.batch_samplers import StratifiedBatchSampler
 
 # ============================================================
-# Configuration
+# Configuration for k=155
 # ============================================================
 
-CONSENSUS_GENES_FILE = 'results_v2/02_biomarker_discovery/ksweep_analysis/gene_lists/k120_consensus.txt'
-OUTPUT_DIR = Path('results_v2/04_final_models')
-SEEDS = [42, 123, 456, 789, 1011]
+K_VALUE = 155
+CONSENSUS_GENES_FILE = f'results_v2/02_biomarker_discovery/k_selection_with_tuning/k{K_VALUE}/consensus_genes/consensus_genes.txt'
+OUTPUT_DIR = Path(f'results_v2/04_final_models/k{K_VALUE}')
 N_BOOTSTRAP = 1000
 
-# Best hyperparameters from Step 3
+# Fine-tuning LR multiplier (from Step 3 optimization)
+LR_MULTIPLIER = 0.75
+
+# Best hyperparameters from k=155 tuning
 TCGA_CONFIG = {
-    'hidden_sizes': [48, 24],
-    'dropout': 0.3,
+    'hidden_sizes': [32],
+    'dropout': 0.394,
     'batch_norm': False,
-    'learning_rate': 0.000994,
-    'batch_size': 24,
-    'epochs': 200,
-    'alpha': 0.000283,
-    'l1_ratio': 0.3
+    'learning_rate': 8.87e-05,
+    'batch_size': 64,
+    'epochs': 250,
+    'alpha': 0.000730,
+    'l1_ratio': 0.857,
+    'activation': 'relu',
+    'weight_init': 'kaiming_normal'
 }
 
 ORIEN_CONFIG = {
-    'hidden_sizes': [96, 48],
-    'dropout': 0.3,
+    'hidden_sizes': [48],
+    'dropout': 0.433,
     'batch_norm': True,
-    'learning_rate': 0.000620,
+    'learning_rate': 7.59e-05,
     'batch_size': 32,
-    'epochs': 200,
-    'alpha': 0.000081,
-    'l1_ratio': 0.5
+    'epochs': 250,
+    'alpha': 0.000388,
+    'l1_ratio': 0.520,
+    'activation': 'elu',
+    'weight_init': 'kaiming_normal'
 }
+
 # ============================================================
-# Data Loading Function
+# Data Loading
 # ============================================================
+
+def load_consensus_genes(filepath):
+    """Load consensus genes from file"""
+    with open(filepath, 'r') as f:
+        genes = [line.strip() for line in f if line.strip()]
+    return genes
+
 
 def load_data(consensus_genes):
     """Load and filter data to consensus genes"""
@@ -84,75 +105,202 @@ def load_data(consensus_genes):
     
     # Filter to consensus genes
     logger.info(f"Filtering to {len(consensus_genes)} consensus genes...")
-    tcga_expr = tcga_expr.loc[tcga_expr.index.isin(consensus_genes)]
-    orien_expr = orien_expr.loc[orien_expr.index.isin(consensus_genes)]
     
-    logger.info(f"  TCGA: {tcga_expr.shape[1]} samples × {tcga_expr.shape[0]} genes")
-    logger.info(f"  ORIEN: {orien_expr.shape[1]} samples × {orien_expr.shape[0]} genes")
+    available_tcga = [g for g in consensus_genes if g in tcga_expr.index]
+    available_orien = [g for g in consensus_genes if g in orien_expr.index]
+    common_genes = sorted(list(set(available_tcga) & set(available_orien)))
+    
+    logger.info(f"  Using {len(common_genes)} genes available in both cohorts")
+    
+    tcga_expr = tcga_expr.loc[common_genes]
+    orien_expr = orien_expr.loc[common_genes]
     
     # Match samples between expression and survival data
     def match_samples(expr_df, surv_df, cohort_name):
-        """Match samples between expression and survival data"""
         expr_samples = set(expr_df.columns)
         surv_samples = set(surv_df['sampleID'])
         matched = sorted(list(expr_samples.intersection(surv_samples)))
         
-        logger.info(f"  {cohort_name}: {len(matched)}/{len(surv_samples)} samples matched")
+        logger.info(f"  {cohort_name}: {len(matched)} samples matched")
         
         expr_df = expr_df[matched]
         surv_df = surv_df[surv_df['sampleID'].isin(matched)].set_index('sampleID')
+        surv_df = surv_df.loc[matched]  # Ensure same order
         
         return expr_df, surv_df
     
-    # Match samples
     tcga_expr, tcga_surv = match_samples(tcga_expr, tcga_surv, 'TCGA')
     orien_expr, orien_surv = match_samples(orien_expr, orien_surv, 'ORIEN')
     
     # Standardize (Z-score per gene)
     logger.info("Standardizing expression data...")
-    tcga_expr_std = tcga_expr.subtract(tcga_expr.mean(axis=1), axis=0).divide(tcga_expr.std(axis=1), axis=0)
-    orien_expr_std = orien_expr.subtract(orien_expr.mean(axis=1), axis=0).divide(orien_expr.std(axis=1), axis=0)
     
-    # Transpose to samples × genes (keep as DataFrames)
-    tcga_X = tcga_expr_std
-    orien_X = orien_expr_std
+    def standardize(expr_df):
+        mean = expr_df.mean(axis=1)
+        std = expr_df.std(axis=1).replace(0, 1)
+        return expr_df.subtract(mean, axis=0).divide(std, axis=0)
     
-    logger.info(f"  Final TCGA: {tcga_X.shape[1]} samples × {tcga_X.shape[0]} genes")  # ← SWAP ORDER
-    logger.info(f"  Final ORIEN: {orien_X.shape[1]} samples × {orien_X.shape[0]} genes")  # ← SWAP ORDER
-
-    # Line 124-138: FIX sample_ids
+    tcga_expr = standardize(tcga_expr)
+    orien_expr = standardize(orien_expr)
+    
+    # Prepare data dictionaries
     tcga_data = {
-        'X': tcga_X,  # DataFrame (genes × samples)
+        'X': tcga_expr,  # DataFrame (genes × samples)
         'y_time': tcga_surv['time'].values.astype(np.float32),
         'y_event': tcga_surv['event'].values.astype(np.int32),
-        'sample_ids': tcga_X.columns.tolist(),  # ← CHANGE .index to .columns
+        'sample_ids': tcga_expr.columns.tolist(),
         'surv_df': tcga_surv[['time', 'event']]
     }
-
+    
     orien_data = {
-        'X': orien_X,  # DataFrame (genes × samples)
+        'X': orien_expr,
         'y_time': orien_surv['time'].values.astype(np.float32),
         'y_event': orien_surv['event'].values.astype(np.int32),
-        'sample_ids': orien_X.columns.tolist(),  # ← CHANGE .index to .columns
+        'sample_ids': orien_expr.columns.tolist(),
         'surv_df': orien_surv[['time', 'event']]
     }
-
-    # Line 366-367: FIX LOGGING
-    logger.info(f"  TCGA: {tcga_data['X'].shape[1]} samples, {tcga_data['X'].shape[0]} features")  # ← SWAP
-    logger.info(f"  ORIEN: {orien_data['X'].shape[1]} samples, {orien_data['X'].shape[0]} features")  # ← SWAP
+    
+    logger.info(f"  TCGA: {tcga_data['X'].shape[1]} samples × {tcga_data['X'].shape[0]} genes")
+    logger.info(f"  ORIEN: {orien_data['X'].shape[1]} samples × {orien_data['X'].shape[0]} genes")
     
     return tcga_data, orien_data
 
+
 # ============================================================
-# Helper Functions
+# Model Training Functions
 # ============================================================
+
+def train_neural_network(X_train, y_time, y_event, config, device='cuda', pretrained_model=None):
+    """
+    Train neural network survival model.
+    
+    Args:
+        X_train: DataFrame (genes × samples)
+        y_time: survival times
+        y_event: event indicators
+        config: hyperparameters dict
+        device: torch device
+        pretrained_model: optional pretrained model for fine-tuning
+    
+    Returns:
+        trained model
+    """
+    # Create survival DataFrame
+    surv_df = pd.DataFrame({
+        'time': y_time,
+        'event': y_event
+    }, index=X_train.columns)
+    
+    n_samples = X_train.shape[1]
+    n_features = X_train.shape[0]
+    
+    logger.info(f"  Dataset: {n_samples} samples × {n_features} features")
+    logger.info(f"  Events: {surv_df['event'].sum()}/{len(surv_df)} ({100*surv_df['event'].mean():.1f}%)")
+    
+    # Create dataset
+    dataset = SurvivalDataset(X_train, surv_df)
+    
+    # Create model or use pretrained
+    if pretrained_model is not None:
+        model = pretrained_model
+        logger.info(f"  Using pretrained model, fine-tuning with LR={config['learning_rate']:.6f}")
+    else:
+        model = ElasticDeepSurv(
+            n_features=n_features,
+            hidden_sizes=config['hidden_sizes'],
+            dropout=config['dropout'],
+            batch_norm=config['batch_norm'],
+            alpha=config['alpha'],
+            l1_ratio=config['l1_ratio'],
+            activation=config.get('activation', 'relu'),
+            weight_init=config.get('weight_init', 'kaiming_normal')
+        ).to(device)
+        logger.info(f"  Created new model with architecture {config['hidden_sizes']}")
+    
+    model = model.to(device)
+    
+    # Training setup
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
+    
+    # DataLoader with stratified sampling for larger cohorts
+    if n_samples >= 500:
+        sampler = StratifiedBatchSampler(
+            dataset.y_event,
+            batch_size=config['batch_size'],
+            min_events_per_batch=2,
+            shuffle=True,
+            drop_last=False
+        )
+        loader = DataLoader(dataset, batch_sampler=sampler)
+    else:
+        loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
+    
+    # Training loop
+    model.train()
+    for epoch in range(config['epochs']):
+        epoch_loss = 0.0
+        n_batches = 0
+        
+        for batch in loader:
+            batch_x = batch['features'].to(device)
+            batch_time = batch['time'].to(device)
+            batch_event = batch['event'].to(device)
+            
+            optimizer.zero_grad()
+            risk_scores = model(batch_x)
+            loss = model.compute_loss(risk_scores, batch_time, batch_event)
+            
+            if loss is not None and torch.isfinite(loss):
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
+        
+        # Log every 50 epochs
+        if (epoch + 1) % 50 == 0:
+            avg_loss = epoch_loss / max(n_batches, 1)
+            logger.info(f"    Epoch {epoch+1}/{config['epochs']}, Loss: {avg_loss:.4f}")
+    
+    return model
+
+
+def extract_risk_scores(model, X, device='cuda'):
+    """
+    Extract risk scores from trained model.
+    
+    Args:
+        model: trained ElasticDeepSurv model
+        X: DataFrame (genes × samples)
+        device: torch device
+    
+    Returns:
+        numpy array of risk scores
+    """
+    model.eval()
+    
+    # Transpose to samples × genes
+    X_array = X.T.values.astype(np.float32)
+    
+    with torch.no_grad():
+        X_tensor = torch.FloatTensor(X_array).to(device)
+        risk_scores = model(X_tensor).cpu().numpy().flatten()
+    
+    return risk_scores
+
+
+# ============================================================
+# Bootstrap C-index Calculation
+# ============================================================
+
 def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
     """
-    Calculate bootstrap-corrected C-index using lifelines
+    Calculate bootstrap-corrected C-index.
+    
+    Reference: Harrell et al. (1996) - optimism-corrected bootstrap
     """
-    # Apparent C-index (optimistic)
+    # Apparent C-index
     apparent_cindex = concordance_index(y_time, -risk_scores, y_event)
-    # Note: negative risk scores because lifelines expects higher values = better survival
     
     n_samples = len(risk_scores)
     optimism_scores = []
@@ -163,14 +311,13 @@ def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
         if (i + 1) % 200 == 0:
             logger.info(f"    Bootstrap iteration {i+1}/{n_bootstrap}")
         
-        # Resample with replacement - returns array, not None
-        boot_indices_array = resample(
-            np.arange(n_samples), 
-            replace=True, 
+        # Resample with replacement
+        boot_indices = resample(
+            np.arange(n_samples),
+            replace=True,
             random_state=i,
-            n_samples=n_samples  # Explicit number of samples
+            n_samples=n_samples
         )
-        boot_indices = boot_indices_array.tolist()
         
         # In-sample C-index
         c_boot_in = concordance_index(
@@ -179,32 +326,22 @@ def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
             y_event[boot_indices]
         )
         
-        # Out-of-bag indices (using set for faster lookup)
-        boot_indices_set = set(boot_indices)
-        oob_indices = np.array([j for j in range(n_samples) if j not in boot_indices_set])
+        # Out-of-bag indices
+        oob_indices = np.array([j for j in range(n_samples) if j not in set(boot_indices)])
         
-        if len(oob_indices) > 10:  # Need enough OOB samples
+        if len(oob_indices) > 10:
             c_boot_out = concordance_index(
                 y_time[oob_indices],
                 -risk_scores[oob_indices],
                 y_event[oob_indices]
             )
-            
-            # Optimism = in-sample - out-of-sample
             optimism_scores.append(c_boot_in - c_boot_out)
     
-    # Average optimism
+    # Average optimism and correction
     avg_optimism = np.mean(optimism_scores)
     optimism_ci = np.percentile(optimism_scores, [2.5, 97.5])
-    
-    # Corrected C-index
     corrected_cindex = apparent_cindex - avg_optimism
-    
-    # Bootstrap CI for corrected C-index
-    corrected_ci = [
-        apparent_cindex - optimism_ci[1],
-        apparent_cindex - optimism_ci[0]
-    ]
+    corrected_ci = [apparent_cindex - optimism_ci[1], apparent_cindex - optimism_ci[0]]
     
     return {
         'apparent': float(apparent_cindex),
@@ -215,160 +352,28 @@ def bootstrap_cindex(y_event, y_time, risk_scores, n_bootstrap=1000):
     }
 
 
-def train_cox_model(X_train, y_time, y_event, alpha=0.001, l1_ratio=0.5):
-    """
-    Train penalized Cox regression model
-    X_train: DataFrame (genes × samples) - will be transposed internally
-    """
-    # Transpose to samples × genes for Cox model
-    if isinstance(X_train, pd.DataFrame):
-        X_samples_by_genes = X_train.T  # genes×samples → samples×genes
-    else:
-        raise TypeError(f"Expected DataFrame, got {type(X_train)}")
-    
-    # Prepare data for lifelines
-    df = pd.DataFrame(X_samples_by_genes)
-    df['time'] = y_time
-    df['event'] = y_event
-    
-    # Train Cox model with elastic net
-    cph = CoxPHFitter(
-        penalizer=alpha,
-        l1_ratio=l1_ratio
-    )
-    cph.fit(df, duration_col='time', event_col='event')
-    
-    return cph
-
-
-def train_neural_network(X_train, y_time, y_event, config, device='cuda'):
-    """
-    Train neural network survival model
-    X_train: DataFrame (genes × samples)
-    """
-    from torch.utils.data import DataLoader
-    
-    # X_train should already be a DataFrame
-    if not isinstance(X_train, pd.DataFrame):
-        raise TypeError(f"Expected DataFrame, got {type(X_train)}")
-    
-    # Create survival DataFrame with sample IDs from columns
-    surv_df = pd.DataFrame({
-        'time': y_time,
-        'event': y_event
-    }, index=X_train.columns)  # ← CHANGE .index to .columns
-    
-    logger.info(f"  Dataset: {X_train.shape[1]} samples × {X_train.shape[0]} features")  # ← SWAP
-    logger.info(f"  Events: {surv_df['event'].sum()}/{len(surv_df)} ({100*surv_df['event'].mean():.1f}%)")
-    
-    # Create dataset
-    dataset = SurvivalDataset(X_train, surv_df)
-    
-    # Create model
-    n_features = X_train.shape[0]  # ← CHANGE shape[1] to shape[0] (number of genes)
-    model = ElasticDeepSurv(
-        n_features=n_features,
-        hidden_sizes=config['hidden_sizes'],
-        dropout=config['dropout'],
-        batch_norm=config['batch_norm'],
-        alpha=config['alpha'],
-        l1_ratio=config['l1_ratio']
-    ).to(device)
-    
-    # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
-    
-    # DataLoader
-    if len(X_train) > 500:
-        from src.utils.batch_samplers import StratifiedBatchSampler
-        sampler = StratifiedBatchSampler(
-            dataset.y_event, 
-            batch_size=config['batch_size'], 
-            min_events_per_batch=2
-        )
-        loader = DataLoader(dataset, batch_sampler=sampler)
-    else:
-        loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
-    
-    # Training loop
-    model.train()
-    for epoch in range(config['epochs']):
-        for batch in loader:
-            batch_x = batch['features'].to(device)
-            batch_time = batch['time'].to(device)
-            batch_event = batch['event'].to(device)
-            
-            optimizer.zero_grad()
-            risk_scores = model(batch_x)
-            loss = model.cox_loss(risk_scores, batch_time, batch_event)
-            
-            if loss is not None and torch.isfinite(loss):
-                loss.backward()
-                optimizer.step()
-        
-        # Log every 50 epochs
-        if (epoch + 1) % 50 == 0:
-            logger.info(f"    Epoch {epoch+1}/{config['epochs']}")
-    
-    return model
-
-
-def extract_risk_scores(model, X, model_type='neural'):
-    """
-    Extract risk scores from trained model
-    X: DataFrame (genes × samples) for consistency
-    """
-    if model_type == 'cox':
-        # Cox model needs samples × genes
-        if isinstance(X, pd.DataFrame):
-            X_transposed = X.T  # genes×samples → samples×genes
-        else:
-            X_transposed = X
-        df = pd.DataFrame(X_transposed)
-        risk_scores = model.predict_partial_hazard(df).values
-    else:
-        # Neural network needs samples × genes
-        # X is genes×samples, so transpose it
-        if isinstance(X, pd.DataFrame):
-            X_array = X.T.values  # genes×samples → samples×genes → numpy
-        else:
-            X_array = X.T if hasattr(X, 'T') else X
-        
-        device = next(model.parameters()).device
-        model.eval()
-        with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_array).to(device)
-            risk_scores = model(X_tensor).cpu().numpy().flatten()
-    
-    return risk_scores
-
-
 # ============================================================
 # Main Training Function
 # ============================================================
 
 def train_all_models():
     """
-    Train all models on full data and calculate bootstrap C-index
+    Train transfer learning models on full data.
     """
     logger.info("=" * 60)
-    logger.info("Step 4.1: Training Final Models on Full Data")
+    logger.info(f"Step 4.1: Training Final Models (k={K_VALUE})")
     logger.info("=" * 60)
     
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     # Load consensus genes
-    logger.info(f"\nLoading consensus genes from k=120...")
-    with open(CONSENSUS_GENES_FILE, 'r') as f:
-        consensus_genes = [line.strip() for line in f]
+    logger.info(f"\nLoading consensus genes from k={K_VALUE}...")
+    consensus_genes = load_consensus_genes(CONSENSUS_GENES_FILE)
     logger.info(f"  Loaded {len(consensus_genes)} genes")
     
-    # Load and prepare data
+    # Load data
     logger.info("\nLoading data...")
     tcga_data, orien_data = load_data(consensus_genes)
-    
-    logger.info(f"  TCGA: {tcga_data['X'].shape[0]} samples, {tcga_data['X'].shape[1]} features")
-    logger.info(f"  ORIEN: {orien_data['X'].shape[0]} samples, {orien_data['X'].shape[1]} features")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"  Device: {device}")
@@ -376,231 +381,146 @@ def train_all_models():
     all_results = {}
     
     # ============================================================
-    # 1. Cox Regression Models
+    # 1. ORIEN→TCGA Transfer Learning
     # ============================================================
     logger.info("\n" + "=" * 60)
-    logger.info("Training Cox Regression Models")
+    logger.info("Training ORIEN→TCGA Transfer Learning")
     logger.info("=" * 60)
     
-    for cohort_name, data in [('TCGA', tcga_data), ('ORIEN', orien_data)]:
-        logger.info(f"\n{cohort_name} Cox Regression:")
-        
-        # Train Cox model
-        cox_model = train_cox_model(
-            data['X'], data['y_time'], data['y_event'],
-            alpha=0.001, l1_ratio=0.5
-        )
-        
-        # Extract risk scores
-        risk_scores = extract_risk_scores(cox_model, data['X'], model_type='cox')
-        
-        # Bootstrap C-index
-        logger.info("  Calculating bootstrap-corrected C-index...")
-        bootstrap_results = bootstrap_cindex(
-            data['y_event'], data['y_time'], risk_scores, N_BOOTSTRAP
-        )
-        
-        logger.info(f"  Apparent C-index: {bootstrap_results['apparent']:.4f}")
-        logger.info(f"  Optimism: {bootstrap_results['optimism']:.4f}")
-        logger.info(f"  Corrected C-index: {bootstrap_results['corrected']:.4f} "
-                   f"({bootstrap_results['corrected_ci_95'][0]:.4f}-{bootstrap_results['corrected_ci_95'][1]:.4f})")
-        
-        # Save results
-        all_results[f'{cohort_name}_Cox'] = {
-            'method': 'Cox Regression',
-            'cohort': cohort_name,
-            'bootstrap_results': bootstrap_results,
-            'n_samples': int(len(data['X'])),
-            'n_events': int(data['y_event'].sum())
-        }
-        
-        # Save risk scores
-        risk_df = pd.DataFrame({
-            'sample_id': data.get('sample_ids', range(len(risk_scores))),
-            'risk_score': risk_scores,
-            'time': data['y_time'],
-            'event': data['y_event']
-        })
-        risk_df.to_csv(OUTPUT_DIR / f'{cohort_name}_Cox_risk_scores.csv', index=False)
-        logger.info(f"  Saved risk scores to {cohort_name}_Cox_risk_scores.csv")
+    # Step 1a: Pretrain on full ORIEN using TCGA architecture
+    logger.info("\n[1a] Pretraining on full ORIEN...")
+    pretrain_config = ORIEN_CONFIG.copy()
+    pretrain_config['hidden_sizes'] = TCGA_CONFIG['hidden_sizes']  # Use target architecture
     
-    # ============================================================
-    # 2. Target-only Neural Networks
-    # ============================================================
-    logger.info("\n" + "=" * 60)
-    logger.info("Training Target-only Neural Networks")
-    logger.info("=" * 60)
-    
-    for cohort_name, data, config in [
-        ('TCGA', tcga_data, TCGA_CONFIG),
-        ('ORIEN', orien_data, ORIEN_CONFIG)
-    ]:
-        logger.info(f"\n{cohort_name} Target-only:")
-        
-        # Train neural network
-        model = train_neural_network(
-            data['X'], data['y_time'], data['y_event'],
-            config, device
-        )
-        
-        # Extract risk scores
-        risk_scores = extract_risk_scores(model, data['X'], model_type='neural')
-        
-        # Bootstrap C-index
-        logger.info("  Calculating bootstrap-corrected C-index...")
-        bootstrap_results = bootstrap_cindex(
-            data['y_event'], data['y_time'], risk_scores, N_BOOTSTRAP
-        )
-        
-        logger.info(f"  Apparent C-index: {bootstrap_results['apparent']:.4f}")
-        logger.info(f"  Optimism: {bootstrap_results['optimism']:.4f}")
-        logger.info(f"  Corrected C-index: {bootstrap_results['corrected']:.4f} "
-                   f"({bootstrap_results['corrected_ci_95'][0]:.4f}-{bootstrap_results['corrected_ci_95'][1]:.4f})")
-        
-        # Save results
-        all_results[f'{cohort_name}_TargetOnly'] = {
-            'method': 'Target-only Neural Network',
-            'cohort': cohort_name,
-            'bootstrap_results': bootstrap_results,
-            'n_samples': int(len(data['X'])),
-            'n_events': int(data['y_event'].sum())
-        }
-        
-        # Save risk scores
-        risk_df = pd.DataFrame({
-            'sample_id': data.get('sample_ids', range(len(risk_scores))),
-            'risk_score': risk_scores,
-            'time': data['y_time'],
-            'event': data['y_event']
-        })
-        risk_df.to_csv(OUTPUT_DIR / f'{cohort_name}_TargetOnly_risk_scores.csv', index=False)
-        
-        # Save model
-        torch.save(model.state_dict(), OUTPUT_DIR / f'{cohort_name}_TargetOnly_model.pth')
-        logger.info(f"  Saved model and risk scores")
-    
-    # ============================================================
-    # 3. Transfer Learning: ORIEN→TCGA
-    # ============================================================
-    logger.info("\n" + "=" * 60)
-    logger.info("Training Transfer Learning: ORIEN→TCGA")
-    logger.info("=" * 60)
-    
-    # Pre-train on ORIEN
-    logger.info("\nPre-training on ORIEN (full data)...")
-    pretrain_model = train_neural_network(
+    pretrain_model_orien = train_neural_network(
         orien_data['X'], orien_data['y_time'], orien_data['y_event'],
-        ORIEN_CONFIG, device
+        pretrain_config, device
     )
     
-    # Fine-tune on TCGA (with reduced LR)
-    logger.info("\nFine-tuning on TCGA (full data)...")
+    # Step 1b: Fine-tune on full TCGA
+    logger.info("\n[1b] Fine-tuning on full TCGA...")
     finetune_config = TCGA_CONFIG.copy()
-    finetune_config['learning_rate'] = TCGA_CONFIG['learning_rate'] / 10  # 10× reduction
+    finetune_config['learning_rate'] = ORIEN_CONFIG['learning_rate'] * LR_MULTIPLIER
     
-    # Load pre-trained weights into TCGA architecture
-    # Note: Architecture mismatch - need to handle this properly
-    # For now, train from scratch but with pre-trained initialization strategy
-    model_orien_tcga = train_neural_network(
+    model_orien_to_tcga = train_neural_network(
         tcga_data['X'], tcga_data['y_time'], tcga_data['y_event'],
-        finetune_config, device
+        finetune_config, device, pretrained_model=pretrain_model_orien
     )
     
     # Extract risk scores
-    risk_scores = extract_risk_scores(model_orien_tcga, tcga_data['X'], model_type='neural')
+    risk_scores_tcga = extract_risk_scores(model_orien_to_tcga, tcga_data['X'], device)
     
     # Bootstrap C-index
-    logger.info("  Calculating bootstrap-corrected C-index...")
-    bootstrap_results = bootstrap_cindex(
-        tcga_data['y_event'], tcga_data['y_time'], risk_scores, N_BOOTSTRAP
+    logger.info("\n  Calculating bootstrap-corrected C-index...")
+    bootstrap_results_tcga = bootstrap_cindex(
+        tcga_data['y_event'], tcga_data['y_time'], risk_scores_tcga, N_BOOTSTRAP
     )
     
-    logger.info(f"  Apparent C-index: {bootstrap_results['apparent']:.4f}")
-    logger.info(f"  Optimism: {bootstrap_results['optimism']:.4f}")
-    logger.info(f"  Corrected C-index: {bootstrap_results['corrected']:.4f} "
-               f"({bootstrap_results['corrected_ci_95'][0]:.4f}-{bootstrap_results['corrected_ci_95'][1]:.4f})")
+    logger.info(f"  Apparent C-index: {bootstrap_results_tcga['apparent']:.4f}")
+    logger.info(f"  Optimism: {bootstrap_results_tcga['optimism']:.4f}")
+    logger.info(f"  Corrected C-index: {bootstrap_results_tcga['corrected']:.4f} "
+               f"({bootstrap_results_tcga['corrected_ci_95'][0]:.4f}-{bootstrap_results_tcga['corrected_ci_95'][1]:.4f})")
     
     # Save results
     all_results['TCGA_ORIENtoTCGA'] = {
-        'method': 'ORIEN→TCGA Transfer Learning',
+        'method': 'ORIEN→TCGA Transfer',
         'cohort': 'TCGA',
-        'bootstrap_results': bootstrap_results,
-        'n_samples': int(len(tcga_data['X'])),
+        'bootstrap_results': bootstrap_results_tcga,
+        'n_samples': tcga_data['X'].shape[1],
         'n_events': int(tcga_data['y_event'].sum())
     }
     
     # Save risk scores
     risk_df = pd.DataFrame({
-        'sample_id': tcga_data.get('sample_ids', range(len(risk_scores))),
-        'risk_score': risk_scores,
+        'sample_id': tcga_data['sample_ids'],
+        'risk_score': risk_scores_tcga,
         'time': tcga_data['y_time'],
         'event': tcga_data['y_event']
     })
     risk_df.to_csv(OUTPUT_DIR / 'TCGA_ORIENtoTCGA_risk_scores.csv', index=False)
-    torch.save(model_orien_tcga.state_dict(), OUTPUT_DIR / 'TCGA_ORIENtoTCGA_model.pth')
+    
+    # Save model
+    torch.save({
+        'model_state_dict': model_orien_to_tcga.state_dict(),
+        'config': finetune_config,
+        'bootstrap_results': bootstrap_results_tcga
+    }, OUTPUT_DIR / 'TCGA_ORIENtoTCGA_model.pth')
+    
+    logger.info("  Saved model and risk scores")
     
     # ============================================================
-    # 4. Transfer Learning: TCGA→ORIEN (BEST MODEL)
+    # 2. TCGA→ORIEN Transfer Learning
     # ============================================================
     logger.info("\n" + "=" * 60)
-    logger.info("Training Transfer Learning: TCGA→ORIEN (Best Model)")
+    logger.info("Training TCGA→ORIEN Transfer Learning")
     logger.info("=" * 60)
     
-    # Pre-train on TCGA
-    logger.info("\nPre-training on TCGA (full data)...")
-    pretrain_model = train_neural_network(
+    # Step 2a: Pretrain on full TCGA using ORIEN architecture
+    logger.info("\n[2a] Pretraining on full TCGA...")
+    pretrain_config = TCGA_CONFIG.copy()
+    pretrain_config['hidden_sizes'] = ORIEN_CONFIG['hidden_sizes']  # Use target architecture
+    
+    pretrain_model_tcga = train_neural_network(
         tcga_data['X'], tcga_data['y_time'], tcga_data['y_event'],
-        TCGA_CONFIG, device
+        pretrain_config, device
     )
     
-    # Fine-tune on ORIEN (with reduced LR)
-    logger.info("\nFine-tuning on ORIEN (full data)...")
+    # Step 2b: Fine-tune on full ORIEN
+    logger.info("\n[2b] Fine-tuning on full ORIEN...")
     finetune_config = ORIEN_CONFIG.copy()
-    finetune_config['learning_rate'] = ORIEN_CONFIG['learning_rate'] / 10  # 10× reduction
+    finetune_config['learning_rate'] = TCGA_CONFIG['learning_rate'] * LR_MULTIPLIER
     
-    model_tcga_orien = train_neural_network(
+    model_tcga_to_orien = train_neural_network(
         orien_data['X'], orien_data['y_time'], orien_data['y_event'],
-        finetune_config, device
+        finetune_config, device, pretrained_model=pretrain_model_tcga
     )
     
     # Extract risk scores
-    risk_scores = extract_risk_scores(model_tcga_orien, orien_data['X'], model_type='neural')
+    risk_scores_orien = extract_risk_scores(model_tcga_to_orien, orien_data['X'], device)
     
     # Bootstrap C-index
-    logger.info("  Calculating bootstrap-corrected C-index...")
-    bootstrap_results = bootstrap_cindex(
-        orien_data['y_event'], orien_data['y_time'], risk_scores, N_BOOTSTRAP
+    logger.info("\n  Calculating bootstrap-corrected C-index...")
+    bootstrap_results_orien = bootstrap_cindex(
+        orien_data['y_event'], orien_data['y_time'], risk_scores_orien, N_BOOTSTRAP
     )
     
-    logger.info(f"  Apparent C-index: {bootstrap_results['apparent']:.4f}")
-    logger.info(f"  Optimism: {bootstrap_results['optimism']:.4f}")
-    logger.info(f"  Corrected C-index: {bootstrap_results['corrected']:.4f} "
-               f"({bootstrap_results['corrected_ci_95'][0]:.4f}-{bootstrap_results['corrected_ci_95'][1]:.4f})")
+    logger.info(f"  Apparent C-index: {bootstrap_results_orien['apparent']:.4f}")
+    logger.info(f"  Optimism: {bootstrap_results_orien['optimism']:.4f}")
+    logger.info(f"  Corrected C-index: {bootstrap_results_orien['corrected']:.4f} "
+               f"({bootstrap_results_orien['corrected_ci_95'][0]:.4f}-{bootstrap_results_orien['corrected_ci_95'][1]:.4f})")
     
     # Save results
     all_results['ORIEN_TCGAtoORIEN'] = {
-        'method': 'TCGA→ORIEN Transfer Learning',
+        'method': 'TCGA→ORIEN Transfer',
         'cohort': 'ORIEN',
-        'bootstrap_results': bootstrap_results,
-        'n_samples': int(len(orien_data['X'])),
+        'bootstrap_results': bootstrap_results_orien,
+        'n_samples': orien_data['X'].shape[1],
         'n_events': int(orien_data['y_event'].sum())
     }
     
     # Save risk scores
     risk_df = pd.DataFrame({
-        'sample_id': orien_data.get('sample_ids', range(len(risk_scores))),
-        'risk_score': risk_scores,
+        'sample_id': orien_data['sample_ids'],
+        'risk_score': risk_scores_orien,
         'time': orien_data['y_time'],
         'event': orien_data['y_event']
     })
     risk_df.to_csv(OUTPUT_DIR / 'ORIEN_TCGAtoORIEN_risk_scores.csv', index=False)
-    torch.save(model_tcga_orien.state_dict(), OUTPUT_DIR / 'ORIEN_TCGAtoORIEN_model.pth')
+    
+    # Save model
+    torch.save({
+        'model_state_dict': model_tcga_to_orien.state_dict(),
+        'config': finetune_config,
+        'bootstrap_results': bootstrap_results_orien
+    }, OUTPUT_DIR / 'ORIEN_TCGAtoORIEN_model.pth')
+    
+    logger.info("  Saved model and risk scores")
     
     # ============================================================
     # Save Summary
     # ============================================================
     logger.info("\n" + "=" * 60)
-    logger.info("Saving Summary Results")
+    logger.info("Summary")
     logger.info("=" * 60)
     
     # Save all results
@@ -635,8 +555,10 @@ def train_all_models():
     logger.info("\nGenerated files:")
     logger.info("  - bootstrap_results.json")
     logger.info("  - performance_summary.csv")
-    logger.info("  - *_risk_scores.csv (8 files)")
-    logger.info("  - *_model.pth (6 files)")
+    logger.info("  - TCGA_ORIENtoTCGA_risk_scores.csv")
+    logger.info("  - ORIEN_TCGAtoORIEN_risk_scores.csv")
+    logger.info("  - TCGA_ORIENtoTCGA_model.pth")
+    logger.info("  - ORIEN_TCGAtoORIEN_model.pth")
     
     return all_results
 
