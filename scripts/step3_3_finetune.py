@@ -381,7 +381,7 @@ def finetune_model(direction, target_expr, target_surv, pretrain_model_path,
         train_loader = DataLoader(train_dataset, batch_size=target_batch_size, shuffle=True)
     
     # Fine-tuning settings
-    max_epochs = 300
+    max_epochs = 250
     patience = 80
     
     logger.info(f"\nFine-tuning Settings:")
