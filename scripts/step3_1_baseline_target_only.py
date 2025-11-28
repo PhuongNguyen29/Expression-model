@@ -394,7 +394,7 @@ def train_baseline_model(cohort_name, expr_df, surv_df, params_file, seed,
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
     # Training loop
-    n_epochs = 500
+    n_epochs = 300
     training_history = []
     best_test_cindex = 0.0
     best_train_cindex = 0.0
