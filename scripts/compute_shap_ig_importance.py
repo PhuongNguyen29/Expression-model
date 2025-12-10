@@ -72,6 +72,23 @@ ORIEN_EXPR_FILE = DATA_DIR / "raw" / "orien_batch_corrected.csv"
 TCGA_SURV_FILE = DATA_DIR / "processed" / "surv_tcga_harmonized.csv"
 ORIEN_SURV_FILE = DATA_DIR / "processed" / "surv_orien_harmonized.csv"
 
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_top_k_genes_as_set(gene_names, importance, k=50):
+    """Safely get top-k genes as a set of strings."""
+    indices = np.argsort(-importance)[:k]
+    result = set()
+    for i in indices:
+        idx = int(i)  # Ensure integer
+        if hasattr(gene_names, 'iloc'):
+            gene = str(gene_names.iloc[idx])
+        else:
+            gene = str(gene_names[idx])
+        result.add(gene)
+    return result
+
 
 # =============================================================================
 # Logging Setup
@@ -586,15 +603,15 @@ def compare_importance_methods(
     gene_names = fixed_names
 
     # Top-50 agreement
-    ig_top50 = set(gene_names[i] for i in [np.argsort(-ig_importance)[:50]])
-    l2_top50 = set(gene_names[i] for i in [np.argsort(-l2_importance)[:50]])
+    ig_top50 = get_top_k_genes_as_set(gene_names, ig_importance, 50)
+    l2_top50 = get_top_k_genes_as_set(gene_names, l2_importance, 50)
     
     overlap_ig_l2 = len(ig_top50 & l2_top50)
     logger.info(f"\nTop-50 Gene Overlap:")
     logger.info(f"  IG vs L2: {overlap_ig_l2}/50 ({100*overlap_ig_l2/50:.1f}%)")
     
     if shap_results is not None:
-        shap_top50 = set(gene_names[i] for i in [np.argsort(-shap_importance)[:50]])
+        shap_top50 = get_top_k_genes_as_set(gene_names, shap_importance, 50)
         overlap_ig_shap = len(ig_top50 & shap_top50)
         overlap_shap_l2 = len(shap_top50 & l2_top50)
         logger.info(f"  IG vs SHAP: {overlap_ig_shap}/50 ({100*overlap_ig_shap/50:.1f}%)")
