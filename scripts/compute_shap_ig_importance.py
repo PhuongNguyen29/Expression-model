@@ -577,7 +577,7 @@ def compare_importance_methods(
         corr_shap_l2 = np.nan
     
     # Top-50 agreement
-    ig_top50 = set(np.array(gene_names)[np.argsort(-ig_importance)[:50]].to_list())
+    ig_top50 = set(np.array(gene_names)[np.argsort(-ig_importance)[:50]].tolist())
     l2_top50 = set(np.array(gene_names)[np.argsort(-l2_importance)[:50]].tolist())
     
     overlap_ig_l2 = len(ig_top50 & l2_top50)
