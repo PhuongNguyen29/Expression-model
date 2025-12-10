@@ -577,15 +577,15 @@ def compare_importance_methods(
         corr_shap_l2 = np.nan
     
     # Top-50 agreement
-    ig_top50 = set([gene_names[i] for i in np.argsort(-ig_importance)[:50]])
-    l2_top50 = set([gene_names[i] for i in np.argsort(-l2_importance)[:50]])
+    ig_top50 = set(np.array(gene_names)[np.argsort(-ig_importance)[:50]].to_list())
+    l2_top50 = set(np.array(gene_names)[np.argsort(-l2_importance)[:50]].tolist())
     
     overlap_ig_l2 = len(ig_top50 & l2_top50)
     logger.info(f"\nTop-50 Gene Overlap:")
     logger.info(f"  IG vs L2: {overlap_ig_l2}/50 ({100*overlap_ig_l2/50:.1f}%)")
     
     if shap_results is not None:
-        shap_top50 = set([gene_names[i] for i in np.argsort(-shap_importance)[:50]])
+        shap_top50 = set(np.array(gene_names)[np.argsort(-shap_importance)[:50]].tolist())
         overlap_ig_shap = len(ig_top50 & shap_top50)
         overlap_shap_l2 = len(shap_top50 & l2_top50)
         logger.info(f"  IG vs SHAP: {overlap_ig_shap}/50 ({100*overlap_ig_shap/50:.1f}%)")
