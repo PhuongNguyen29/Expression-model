@@ -667,8 +667,8 @@ def check_cox_gene_overlap(
     
     for k in k_values:
         # Top-k genes by each method
-        ig_topk = set(comparison_df.nsmallest(k, 'ig_rank')['gene'])
-        l2_topk = set(comparison_df.nsmallest(k, 'l2_rank')['gene'])
+        ig_topk = set(comparison_df.nsmallest(k, 'ig_rank')['gene_name'])
+        l2_topk = set(comparison_df.nsmallest(k, 'l2_rank')['gene_name'])
         
         ig_overlap = len(ig_topk & set(cox_genes))
         l2_overlap = len(l2_topk & set(cox_genes))
@@ -679,7 +679,7 @@ def check_cox_gene_overlap(
         
         # SHAP if available
         if not comparison_df['shap_rank'].isna().all():
-            shap_topk = set(comparison_df.nsmallest(k, 'shap_rank')['gene'])
+            shap_topk = set(comparison_df.nsmallest(k, 'shap_rank')['gene_name'])
             shap_overlap = len(shap_topk & set(cox_genes))
             results['shap_overlap'].append(shap_overlap)
         else:
@@ -689,8 +689,8 @@ def check_cox_gene_overlap(
                    f"SHAP={results['shap_overlap'][-1] if not np.isnan(results['shap_overlap'][-1]) else 'N/A'}")
     
     # Which Cox genes are captured by IG but not L2?
-    ig_top100 = set(comparison_df.nsmallest(100, 'ig_rank')['gene'])
-    l2_top100 = set(comparison_df.nsmallest(100, 'l2_rank')['gene'])
+    ig_top100 = set(comparison_df.nsmallest(100, 'ig_rank')['gene_name'])
+    l2_top100 = set(comparison_df.nsmallest(100, 'l2_rank')['gene_name'])
     
     cox_in_ig_not_l2 = set(cox_genes) & ig_top100 - l2_top100
     cox_in_l2_not_ig = set(cox_genes) & l2_top100 - ig_top100
