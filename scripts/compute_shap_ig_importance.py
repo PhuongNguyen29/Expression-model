@@ -626,7 +626,7 @@ def compare_importance_methods(
     
     # Create comparison DataFrame
     comparison_df = pd.DataFrame({
-        'gene': gene_names,
+        'gene_name': list(gene_names) if not isinstance(gene_names, list) else gene_names,
         'ig_importance': ig_importance,
         'ig_rank': ig_ranks,
         'ig_signed': ig_results['importance_signed'],
