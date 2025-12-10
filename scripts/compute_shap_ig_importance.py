@@ -731,24 +731,12 @@ def save_results(
     
     # Save SHAP importance (if available)
     if shap_results is not None:
-        print("="*50)
-        print("DEBUG shap_results:")
-        print(f"shap_results keys: {shap_results.keys()}")
-        
-        for key in shap_results.keys():
-            val = shap_results[key]
-            print(f"\n{key}:")
-            print(f"  type: {type(val)}")
-            if hasattr(val, 'shape'):
-                print(f"  shape: {val.shape}")
-            elif hasattr(val, '__len__'):
-                print(f"  len: {len(val)}")
-            if hasattr(val, '__getitem__') and len(val) > 0:
-                print(f"  [0] type: {type(val[0])}")
-                if hasattr(val[0], 'shape'):
-                    print(f"  [0] shape: {val[0].shape}")
-        print("="*50)
-        
+        for results_dict in [ig_results, shap_results]:
+            if results_dict is not None:
+                for key in ['importance_magnitude', 'importance_signed', 'importance_std']:
+                    if key in results_dict and hasattr(results_dict[key], 'shape'):
+                        if len(results_dict[key].shape) > 1:
+                            results_dict[key] = results_dict[key].flatten()
         shap_df = pd.DataFrame({
             'gene': shap_results['gene_names'],
             'importance_magnitude': shap_results['importance_magnitude'],
