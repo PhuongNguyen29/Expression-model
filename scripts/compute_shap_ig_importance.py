@@ -78,12 +78,15 @@ ORIEN_SURV_FILE = DATA_DIR / "processed" / "surv_orien_harmonized.csv"
 
 def get_top_k_genes_as_set(gene_names, importance, k=50):
     """Safely get top-k genes as a set of strings."""
-    indices = np.argsort(-importance)[:k]
+    imp = np.array(importance).flatten()
+    indices = np.argsort(-imp)[:k]
     result = set()
     for i in indices:
-        idx = int(i)  # Ensure integer
+        idx = i.item() if hasattr(i, 'item') else int(i)
         if hasattr(gene_names, 'iloc'):
             gene = str(gene_names.iloc[idx])
+        elif isinstance(gene_names, np.ndarray):
+            gene = str(gene_names.flat[idx])
         else:
             gene = str(gene_names[idx])
         result.add(gene)
@@ -616,6 +619,10 @@ def compare_importance_methods(
         overlap_shap_l2 = len(shap_top50 & l2_top50)
         logger.info(f"  IG vs SHAP: {overlap_ig_shap}/50 ({100*overlap_ig_shap/50:.1f}%)")
         logger.info(f"  SHAP vs L2: {overlap_shap_l2}/50 ({100*overlap_shap_l2/50:.1f}%)")
+        
+    ig_importance = np.array(ig_importance).flatten()
+    l2_importance = np.array(l2_importance).flatten()
+    shap_importance = np.array(shap_importance).flatten()
     
     # Create comparison DataFrame
     comparison_df = pd.DataFrame({
