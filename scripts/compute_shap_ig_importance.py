@@ -728,8 +728,27 @@ def save_results(
     ig_df.to_csv(output_dir / f'{cohort}_ig_importance.csv', index=False)
     logger.info(f"  Saved: {cohort}_ig_importance.csv")
     
+    
     # Save SHAP importance (if available)
     if shap_results is not None:
+        print("="*50)
+        print("DEBUG shap_results:")
+        print(f"shap_results keys: {shap_results.keys()}")
+        
+        for key in shap_results.keys():
+            val = shap_results[key]
+            print(f"\n{key}:")
+            print(f"  type: {type(val)}")
+            if hasattr(val, 'shape'):
+                print(f"  shape: {val.shape}")
+            elif hasattr(val, '__len__'):
+                print(f"  len: {len(val)}")
+            if hasattr(val, '__getitem__') and len(val) > 0:
+                print(f"  [0] type: {type(val[0])}")
+                if hasattr(val[0], 'shape'):
+                    print(f"  [0] shape: {val[0].shape}")
+        print("="*50)
+        
         shap_df = pd.DataFrame({
             'gene': shap_results['gene_names'],
             'importance_magnitude': shap_results['importance_magnitude'],
