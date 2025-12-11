@@ -157,15 +157,18 @@ def train_and_test_direction_single_seed(
     data_dir: Path,
     config: dict,
     seed: int,
-    device: str = None
+    device: str = None,
+    min_epochs: int = 50,
+    max_epochs: int = 150,
+    output_dir: Path = None
 ) -> Dict:
     """
     Train on 100% SOURCE cohort → Test on TARGET cohort.
     
     OPTION 2 IMPLEMENTATION:
     - No train/validation split on source
-    - Train for exactly CV-derived epochs
-    - No early stopping
+    - Train for CV-derived epochs (with min/max bounds)
+    - Track test performance for analysis (but don't use for early stopping)
     - Fair comparison with Cox elastic net
     """
     if device is None:
@@ -200,13 +203,13 @@ def train_and_test_direction_single_seed(
     
     # Get CV-derived epochs from hyperparameter tuning
     cv_epochs_info = source_params.get('cv_epochs_info', {})
-    cv_derived_epochs = int(cv_epochs_info.get('mean_best_epoch', 50))
+    cv_derived_epochs = int(cv_epochs_info.get('mean_best_epoch', 100))
     
-    # Scale epochs for 100% data (vs 80% in CV)
-    # More data = more batches per epoch = scale epochs by 0.8
-    scaled_epochs = max(10, int(cv_derived_epochs * 0.8))
+    # Scale epochs for 100% data, but enforce min/max bounds
+    scaled_epochs = int(cv_derived_epochs * 0.8)
+    scaled_epochs = max(min_epochs, min(scaled_epochs, max_epochs))
     
-    logger.info(f"CV-derived epochs: {cv_derived_epochs}, Scaled for 100% data: {scaled_epochs}")
+    logger.info(f"CV-derived epochs: {cv_derived_epochs}, Scaled: {scaled_epochs} (min={min_epochs}, max={max_epochs})")
     
     # Load RAW data
     tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
@@ -292,34 +295,94 @@ def train_and_test_direction_single_seed(
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
-    # Train for exactly scaled_epochs (NO early stopping, NO validation)
-    logger.info(f"Training for {scaled_epochs} epochs (no early stopping)...")
+    # Train for scaled_epochs, tracking both train and test performance
+    logger.info(f"Training for {scaled_epochs} epochs (tracking test for analysis)...")
+    
+    training_history = []
+    best_test_cindex = 0.0
+    best_test_epoch = 0
     
     for epoch in range(scaled_epochs):
         train_loss = train_epoch_manual(model, source_loader, optimizer, device)
         
-        if (epoch + 1) % 10 == 0 or epoch == 0:
+        # Evaluate every 5 epochs or at start/end
+        if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == scaled_epochs - 1:
             train_cindex = evaluate_model(model, source_loader, device)
-            logger.info(f"  Epoch {epoch+1}/{scaled_epochs}: Loss={train_loss:.4f}, Train C-index={train_cindex:.4f}")
+            test_cindex = evaluate_model(model, target_loader, device)
+            
+            training_history.append({
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_cindex': train_cindex,
+                'test_cindex': test_cindex
+            })
+            
+            # Track best test (for analysis, not for model selection)
+            if test_cindex > best_test_cindex:
+                best_test_cindex = test_cindex
+                best_test_epoch = epoch + 1
+            
+            logger.info(f"  Epoch {epoch+1}/{scaled_epochs}: Loss={train_loss:.4f}, "
+                       f"Train={train_cindex:.4f}, Test={test_cindex:.4f}")
     
     # Final evaluation
     final_train_cindex = evaluate_model(model, source_loader, device)
-    test_cindex = evaluate_model(model, target_loader, device)
+    final_test_cindex = evaluate_model(model, target_loader, device)
     
     logger.info(f"\nFinal Results:")
     logger.info(f"  Train C-index ({source_cohort.upper()} 100%): {final_train_cindex:.4f}")
-    logger.info(f"  Test C-index ({target_cohort.upper()}): {test_cindex:.4f}")
+    logger.info(f"  Test C-index ({target_cohort.upper()}): {final_test_cindex:.4f}")
+    logger.info(f"  Best Test C-index: {best_test_cindex:.4f} at epoch {best_test_epoch}")
+    
+    # Save training curve plot if output_dir provided
+    if output_dir is not None and training_history:
+        plot_dir = output_dir / "training_curves"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        
+        epochs = [h['epoch'] for h in training_history]
+        train_cindices = [h['train_cindex'] for h in training_history]
+        test_cindices = [h['test_cindex'] for h in training_history]
+        losses = [h['train_loss'] for h in training_history]
+        
+        # Left: Loss
+        ax1.plot(epochs, losses, 'b-', linewidth=2)
+        ax1.set_xlabel('Epoch', fontsize=11)
+        ax1.set_ylabel('Train Loss', fontsize=11)
+        ax1.set_title(f'{source_cohort.upper()}→{target_cohort.upper()} Loss (Seed {seed})', fontsize=12)
+        ax1.grid(True, alpha=0.3)
+        
+        # Right: C-index
+        ax2.plot(epochs, train_cindices, 'b-', label='Train', linewidth=2)
+        ax2.plot(epochs, test_cindices, 'r-', label='Test', linewidth=2)
+        ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+        ax2.axvline(x=best_test_epoch, color='green', linestyle='--', alpha=0.7, 
+                   label=f'Best Test: {best_test_cindex:.3f} @ ep{best_test_epoch}')
+        ax2.set_xlabel('Epoch', fontsize=11)
+        ax2.set_ylabel('C-index', fontsize=11)
+        ax2.set_title(f'{source_cohort.upper()}→{target_cohort.upper()} C-index (Seed {seed})', fontsize=12)
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(plot_dir / f'{source_cohort}_to_{target_cohort}_seed{seed}.png', 
+                   dpi=150, bbox_inches='tight')
+        plt.close()
     
     return {
         'seed': seed,
         'source': source_cohort,
         'target': target_cohort,
         'train_cindex': final_train_cindex,
-        'test_cindex': test_cindex,
+        'test_cindex': final_test_cindex,
+        'best_test_cindex': best_test_cindex,
+        'best_test_epoch': best_test_epoch,
         'architecture': hidden_sizes,
         'cv_derived_epochs': cv_derived_epochs,
         'scaled_epochs': scaled_epochs,
-        'n_source_samples': n_source_samples
+        'n_source_samples': n_source_samples,
+        'training_history': training_history
     }
 
 
@@ -331,12 +394,16 @@ def train_and_test_direction_multi_seed(
     data_dir: Path,
     config: dict,
     seeds: List[int] = SEEDS,
-    device: str = None
+    device: str = None,
+    min_epochs: int = 50,
+    max_epochs: int = 150,
+    output_dir: Path = None
 ) -> Dict:
     """Run training/testing across multiple seeds and aggregate results."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Direction: {source_cohort.upper()} (100%) → {target_cohort.upper()}")
     logger.info(f"Running {len(seeds)} seeds: {seeds}")
+    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
     logger.info(f"{'='*60}")
     
     all_results = []
@@ -351,7 +418,10 @@ def train_and_test_direction_multi_seed(
                 data_dir=data_dir,
                 config=config,
                 seed=seed,
-                device=device
+                device=device,
+                min_epochs=min_epochs,
+                max_epochs=max_epochs,
+                output_dir=output_dir
             )
             all_results.append(result)
         except Exception as e:
@@ -366,6 +436,8 @@ def train_and_test_direction_multi_seed(
     # Aggregate
     train_cindices = [r['train_cindex'] for r in all_results]
     test_cindices = [r['test_cindex'] for r in all_results]
+    best_test_cindices = [r['best_test_cindex'] for r in all_results]
+    best_test_epochs = [r['best_test_epoch'] for r in all_results]
     
     aggregated = {
         'source': source_cohort,
@@ -375,6 +447,9 @@ def train_and_test_direction_multi_seed(
         'train_cindex_std': float(np.std(train_cindices)),
         'test_cindex_mean': float(np.mean(test_cindices)),
         'test_cindex_std': float(np.std(test_cindices)),
+        'best_test_cindex_mean': float(np.mean(best_test_cindices)),
+        'best_test_cindex_std': float(np.std(best_test_cindices)),
+        'best_test_epoch_mean': float(np.mean(best_test_epochs)),
         'test_cindices_all': test_cindices,
         'architecture': all_results[0]['architecture'],
         'per_seed_results': all_results
@@ -382,7 +457,9 @@ def train_and_test_direction_multi_seed(
     
     logger.info(f"\nAggregated Results:")
     logger.info(f"  Train: {aggregated['train_cindex_mean']:.4f} ± {aggregated['train_cindex_std']:.4f}")
-    logger.info(f"  Test:  {aggregated['test_cindex_mean']:.4f} ± {aggregated['test_cindex_std']:.4f}")
+    logger.info(f"  Test (final): {aggregated['test_cindex_mean']:.4f} ± {aggregated['test_cindex_std']:.4f}")
+    logger.info(f"  Test (best):  {aggregated['best_test_cindex_mean']:.4f} ± {aggregated['best_test_cindex_std']:.4f}")
+    logger.info(f"  Best epoch avg: {aggregated['best_test_epoch_mean']:.1f}")
     
     return aggregated
 
@@ -394,12 +471,15 @@ def cross_cohort_validation(
     k: int,
     output_dir: Path,
     data_dir: Path,
-    seeds: List[int] = SEEDS
+    seeds: List[int] = SEEDS,
+    min_epochs: int = 50,
+    max_epochs: int = 150
 ) -> Dict:
     """Cross-cohort validation using optimal hyperparameters with multiple seeds."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Cross-Cohort Validation (k={k}, m={len(consensus_genes)})")
     logger.info(f"Method: Train on 100% source, CV-derived epochs")
+    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
     logger.info(f"{'='*60}")
     
     validation_dir = output_dir / f"k{k:03d}" / "cross_cohort_validation"
@@ -432,7 +512,10 @@ def cross_cohort_validation(
         consensus_genes=consensus_genes,
         data_dir=data_dir,
         config=config,
-        seeds=seeds
+        seeds=seeds,
+        min_epochs=min_epochs,
+        max_epochs=max_epochs,
+        output_dir=validation_dir
     )
     
     # Direction 2: TCGA → ORIEN
@@ -443,7 +526,10 @@ def cross_cohort_validation(
         consensus_genes=consensus_genes,
         data_dir=data_dir,
         config=config,
-        seeds=seeds
+        seeds=seeds,
+        min_epochs=min_epochs,
+        max_epochs=max_epochs,
+        output_dir=validation_dir
     )
     
     # Calculate statistics
@@ -460,16 +546,21 @@ def cross_cohort_validation(
         'm': len(consensus_genes),
         'n_seeds': len(seeds),
         'method': 'train_100pct_source_cv_epochs',
+        'epoch_bounds': {'min': min_epochs, 'max': max_epochs},
         'orien_to_tcga': {
             'test_cindex_mean': o2t_mean,
             'test_cindex_std': o2t_std,
             'train_cindex_mean': o2t_results['train_cindex_mean'],
+            'best_test_cindex_mean': o2t_results['best_test_cindex_mean'],
+            'best_test_epoch_mean': o2t_results['best_test_epoch_mean'],
             'all_test_cindices': o2t_results['test_cindices_all']
         },
         'tcga_to_orien': {
             'test_cindex_mean': t2o_mean,
             'test_cindex_std': t2o_std,
             'train_cindex_mean': t2o_results['train_cindex_mean'],
+            'best_test_cindex_mean': t2o_results['best_test_cindex_mean'],
+            'best_test_epoch_mean': t2o_results['best_test_epoch_mean'],
             'all_test_cindices': t2o_results['test_cindices_all']
         },
         'mean_bidirectional_cindex': mean_bidirectional,
@@ -570,12 +661,18 @@ def main():
                         help='Data directory')
     parser.add_argument('--seeds', nargs='+', type=int, default=SEEDS,
                         help='Random seeds for multi-seed validation')
+    parser.add_argument('--min_epochs', type=int, default=50,
+                        help='Minimum training epochs (default: 50)')
+    parser.add_argument('--max_epochs', type=int, default=150,
+                        help='Maximum training epochs (default: 150)')
     
     args = parser.parse_args()
     
     input_dir = Path(args.input_dir)
     data_dir = Path(args.data_dir)
     seeds = args.seeds
+    min_epochs = args.min_epochs
+    max_epochs = args.max_epochs
     
     logger.info("="*80)
     logger.info("CROSS-COHORT VALIDATION (100% SOURCE, CV-DERIVED EPOCHS)")
@@ -583,6 +680,7 @@ def main():
     logger.info(f"Input directory: {input_dir}")
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Seeds: {seeds}")
+    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
     logger.info("Method: Train on 100% source cohort, use CV-derived epochs")
     logger.info("="*80)
     
@@ -625,7 +723,9 @@ def main():
                 k=k,
                 output_dir=input_dir,
                 data_dir=data_dir,
-                seeds=seeds
+                seeds=seeds,
+                min_epochs=min_epochs,
+                max_epochs=max_epochs
             )
             
             # Compile results
