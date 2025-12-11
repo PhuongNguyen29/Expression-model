@@ -712,7 +712,7 @@ def train_and_test_direction(
     data_dir: Path,
     config: dict,
     cv_derived_epochs: int = None,  # Option 2: CV-derived epochs
-    device: str = 'cuda'
+    device: str = None  # Auto-detect if None
 ) -> Dict:
     """
     Train on source (full cohort) → Test on target (full cohort).
@@ -727,6 +727,11 @@ def train_and_test_direction(
     Reference: Katzman et al. (2018) DeepSurv - fair comparison methodology
     """
     logger.info(f"\n--- Training: {source_cohort.upper()} → Testing: {target_cohort.upper()} ---")
+    
+    # Auto-detect device if not specified
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"Using device: {device}")
     
     # Parse hyperparameters from source tuning
     best_params = source_params['best_params']
