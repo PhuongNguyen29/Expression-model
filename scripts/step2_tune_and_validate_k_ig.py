@@ -372,8 +372,8 @@ class LeakageFreeKSelectionTuner:
                 history = trainer.fit(
                     train_loader=train_loader,
                     valid_loader=val_loader,
-                    n_epochs=100,
-                    early_stopping_patience=20,
+                    n_epochs=200,
+                    early_stopping_patience=30,
                     verbose=False
                 )
                 
