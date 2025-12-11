@@ -236,33 +236,18 @@ class LeakageFreeKSelectionTuner:
         # =================================================================
         
         m = self.n_genes_raw  # Number of consensus genes (input features)
-        n_events = int(self.events.sum())
-        
-        # Calculate maximum reasonable parameters (target EPV >= 5)
-        # Being conservative since elastic net provides some regularization
-        max_params_epv5 = n_events // 5
-        
-        logger.debug(f"  m={m} genes, {n_events} events, max_params (EPV=5): {max_params_epv5}")
         
         if self.n_samples < 500:  # TCGA (~153 events)
-            # Very conservative: only 1-layer architectures
-            # Max params ~ m * h1, so h1 <= max_params / m
-            max_h1 = min(64, max(8, max_params_epv5 // m))
-            
+            # 1-layer architectures, scaled by m
             # Define options based on m
             if m <= 40:
-                layer_options = [8, 16, 24]
+                layer_options = [16, 32, 48]
             elif m <= 60:
-                layer_options = [16, 24, 32]
-            elif m <= 80:
-                layer_options = [24, 32, 48]
-            else:  # m > 80
                 layer_options = [32, 48, 64]
-            
-            # Filter by max_h1
-            layer_options = [h for h in layer_options if h <= max_h1]
-            if not layer_options:
-                layer_options = [8]  # Fallback minimum
+            elif m <= 80:
+                layer_options = [48, 64, 96]
+            else:  # m > 80
+                layer_options = [64, 96, 128]
             
             layer1_size = trial.suggest_categorical('layer1_size', layer_options)
             hidden_sizes = [layer1_size]
@@ -271,27 +256,14 @@ class LeakageFreeKSelectionTuner:
             alpha = trial.suggest_float('alpha', 1e-4, 5e-3, log=True)
             
         else:  # ORIEN (~450 events)
-            # More flexibility but still conservative
+            # More flexibility
             if m <= 40:
                 # Small feature set: 1 layer only
-                layer_options = [16, 24, 32, 48]
+                layer_options = [32, 48, 64]
                 layer1_size = trial.suggest_categorical('layer1_size', layer_options)
                 hidden_sizes = [layer1_size]
             elif m <= 70:
                 # Medium feature set: 1 or 2 layers
-                n_layers = trial.suggest_int('n_layers', 1, 2)
-                if n_layers == 1:
-                    layer_options = [32, 48, 64]
-                    layer1_size = trial.suggest_categorical('layer1_size', layer_options)
-                    hidden_sizes = [layer1_size]
-                else:
-                    architecture = trial.suggest_categorical(
-                        'architecture_2layer',
-                        ['32-16', '48-24', '64-32']
-                    )
-                    hidden_sizes = [int(x) for x in architecture.split('-')]
-            else:  # m > 70
-                # Larger feature set: 1 or 2 layers
                 n_layers = trial.suggest_int('n_layers', 1, 2)
                 if n_layers == 1:
                     layer_options = [48, 64, 96]
@@ -303,6 +275,19 @@ class LeakageFreeKSelectionTuner:
                         ['48-24', '64-32', '96-48']
                     )
                     hidden_sizes = [int(x) for x in architecture.split('-')]
+            else:  # m > 70
+                # Larger feature set: 1 or 2 layers
+                n_layers = trial.suggest_int('n_layers', 1, 2)
+                if n_layers == 1:
+                    layer_options = [64, 96, 128]
+                    layer1_size = trial.suggest_categorical('layer1_size', layer_options)
+                    hidden_sizes = [layer1_size]
+                else:
+                    architecture = trial.suggest_categorical(
+                        'architecture_2layer',
+                        ['64-32', '96-48', '128-64']
+                    )
+                    hidden_sizes = [int(x) for x in architecture.split('-')]
             
             # Moderate regularization
             alpha = trial.suggest_float('alpha', 5e-5, 1e-3, log=True)
@@ -311,8 +296,6 @@ class LeakageFreeKSelectionTuner:
         total_params = m * hidden_sizes[0]
         if len(hidden_sizes) > 1:
             total_params += hidden_sizes[0] * hidden_sizes[1]
-        epv_estimate = n_events / total_params
-        logger.debug(f"  Architecture: {hidden_sizes}, ~{total_params} params, EPV~{epv_estimate:.2f}")
         
         # Common hyperparameters
         dropout = trial.suggest_float('dropout', 0.3, 0.5)
