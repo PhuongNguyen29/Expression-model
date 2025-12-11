@@ -158,8 +158,7 @@ def train_and_test_direction_single_seed(
     config: dict,
     seed: int,
     device: str = None,
-    min_epochs: int = 50,
-    max_epochs: int = 150,
+    epochs: int = 150,
     output_dir: Path = None
 ) -> Dict:
     """
@@ -167,7 +166,7 @@ def train_and_test_direction_single_seed(
     
     OPTION 2 IMPLEMENTATION:
     - No train/validation split on source
-    - Train for CV-derived epochs (with min/max bounds)
+    - Train for fixed number of epochs
     - Track test performance for analysis (but don't use for early stopping)
     - Fair comparison with Cox elastic net
     """
@@ -201,15 +200,10 @@ def train_and_test_direction_single_seed(
     batch_norm = best_params['batch_norm']
     weight_init = best_params.get('weight_init', 'kaiming_normal')
     
-    # Get CV-derived epochs from hyperparameter tuning
-    cv_epochs_info = source_params.get('cv_epochs_info', {})
-    cv_derived_epochs = int(cv_epochs_info.get('mean_best_epoch', 100))
+    # Use user-specified epochs directly
+    training_epochs = epochs
     
-    # Scale epochs for 100% data, but enforce min/max bounds
-    scaled_epochs = int(cv_derived_epochs * 0.8)
-    scaled_epochs = max(min_epochs, min(scaled_epochs, max_epochs))
-    
-    logger.info(f"CV-derived epochs: {cv_derived_epochs}, Scaled: {scaled_epochs} (min={min_epochs}, max={max_epochs})")
+    logger.info(f"Training for {training_epochs} epochs")
     
     # Load RAW data
     tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
@@ -395,15 +389,14 @@ def train_and_test_direction_multi_seed(
     config: dict,
     seeds: List[int] = SEEDS,
     device: str = None,
-    min_epochs: int = 50,
-    max_epochs: int = 150,
+    epochs: int = 150,
     output_dir: Path = None
 ) -> Dict:
     """Run training/testing across multiple seeds and aggregate results."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Direction: {source_cohort.upper()} (100%) → {target_cohort.upper()}")
     logger.info(f"Running {len(seeds)} seeds: {seeds}")
-    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
+    logger.info(f"Epochs: {epochs}")
     logger.info(f"{'='*60}")
     
     all_results = []
@@ -419,8 +412,7 @@ def train_and_test_direction_multi_seed(
                 config=config,
                 seed=seed,
                 device=device,
-                min_epochs=min_epochs,
-                max_epochs=max_epochs,
+                epochs=epochs,
                 output_dir=output_dir
             )
             all_results.append(result)
@@ -472,14 +464,12 @@ def cross_cohort_validation(
     output_dir: Path,
     data_dir: Path,
     seeds: List[int] = SEEDS,
-    min_epochs: int = 50,
-    max_epochs: int = 150
+    epochs: int = 150
 ) -> Dict:
     """Cross-cohort validation using optimal hyperparameters with multiple seeds."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Cross-Cohort Validation (k={k}, m={len(consensus_genes)})")
-    logger.info(f"Method: Train on 100% source, CV-derived epochs")
-    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
+    logger.info(f"Method: Train on 100% source, fixed {epochs} epochs")
     logger.info(f"{'='*60}")
     
     validation_dir = output_dir / f"k{k:03d}" / "cross_cohort_validation"
@@ -513,8 +503,7 @@ def cross_cohort_validation(
         data_dir=data_dir,
         config=config,
         seeds=seeds,
-        min_epochs=min_epochs,
-        max_epochs=max_epochs,
+        epochs=epochs,
         output_dir=validation_dir
     )
     
@@ -527,8 +516,7 @@ def cross_cohort_validation(
         data_dir=data_dir,
         config=config,
         seeds=seeds,
-        min_epochs=min_epochs,
-        max_epochs=max_epochs,
+        epochs=epochs,
         output_dir=validation_dir
     )
     
@@ -545,8 +533,8 @@ def cross_cohort_validation(
         'k': k,
         'm': len(consensus_genes),
         'n_seeds': len(seeds),
-        'method': 'train_100pct_source_cv_epochs',
-        'epoch_bounds': {'min': min_epochs, 'max': max_epochs},
+        'method': 'train_100pct_source_fixed_epochs',
+        'epochs': epochs,
         'orien_to_tcga': {
             'test_cindex_mean': o2t_mean,
             'test_cindex_std': o2t_std,
@@ -661,27 +649,24 @@ def main():
                         help='Data directory')
     parser.add_argument('--seeds', nargs='+', type=int, default=SEEDS,
                         help='Random seeds for multi-seed validation')
-    parser.add_argument('--min_epochs', type=int, default=50,
-                        help='Minimum training epochs (default: 50)')
-    parser.add_argument('--max_epochs', type=int, default=150,
-                        help='Maximum training epochs (default: 150)')
+    parser.add_argument('--epochs', type=int, default=150,
+                        help='Number of training epochs (default: 150)')
     
     args = parser.parse_args()
     
     input_dir = Path(args.input_dir)
     data_dir = Path(args.data_dir)
     seeds = args.seeds
-    min_epochs = args.min_epochs
-    max_epochs = args.max_epochs
+    epochs = args.epochs
     
     logger.info("="*80)
-    logger.info("CROSS-COHORT VALIDATION (100% SOURCE, CV-DERIVED EPOCHS)")
+    logger.info("CROSS-COHORT VALIDATION (100% SOURCE, FIXED EPOCHS)")
     logger.info("="*80)
     logger.info(f"Input directory: {input_dir}")
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Seeds: {seeds}")
-    logger.info(f"Epoch bounds: min={min_epochs}, max={max_epochs}")
-    logger.info("Method: Train on 100% source cohort, use CV-derived epochs")
+    logger.info(f"Epochs: {epochs}")
+    logger.info("Method: Train on 100% source cohort")
     logger.info("="*80)
     
     # Find all k-value directories
@@ -724,8 +709,7 @@ def main():
                 output_dir=input_dir,
                 data_dir=data_dir,
                 seeds=seeds,
-                min_epochs=min_epochs,
-                max_epochs=max_epochs
+                epochs=args.epochs
             )
             
             # Compile results
