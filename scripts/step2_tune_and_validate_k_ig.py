@@ -538,11 +538,11 @@ def load_ig_importances(ig_ranking_dir: Path) -> Dict:
     
     # Load TCGA
     tcga_df = pd.read_csv(tcga_file)
-    tcga_df = tcga_df.set_index('gene_name')
+    tcga_df = tcga_df.set_index('gene')  # Column name is 'gene' in aggregated files
     
     # Load ORIEN
     orien_df = pd.read_csv(orien_file)
-    orien_df = orien_df.set_index('gene_name')
+    orien_df = orien_df.set_index('gene')  # Column name is 'gene' in aggregated files
     
     logger.info(f"Loaded TCGA: {len(tcga_df)} genes")
     logger.info(f"Loaded ORIEN: {len(orien_df)} genes")
