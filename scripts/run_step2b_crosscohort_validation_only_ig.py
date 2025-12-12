@@ -60,6 +60,29 @@ def set_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def load_expression_and_survival_data(data_dir: Path) -> Dict:
+    """
+    Load all expression and survival data once.
+    
+    Returns:
+        Dict with keys: tcga_expr_raw, orien_expr_raw, tcga_surv, orien_surv
+    """
+    logger.info("Loading expression and survival data...")
+    
+    tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
+    orien_expr_raw = pd.read_csv(data_dir / "raw" / "orien_batch_corrected.csv", index_col=0)
+    tcga_surv = pd.read_csv(data_dir / "processed" / "surv_tcga_harmonized.csv", index_col=0)
+    orien_surv = pd.read_csv(data_dir / "processed" / "surv_orien_harmonized.csv", index_col=0)
+    
+    logger.info(f"  TCGA: {tcga_expr_raw.shape[1]} samples, {tcga_expr_raw.shape[0]} genes")
+    logger.info(f"  ORIEN: {orien_expr_raw.shape[1]} samples, {orien_expr_raw.shape[0]} genes")
+    
+    return {
+        'tcga_expr_raw': tcga_expr_raw,
+        'orien_expr_raw': orien_expr_raw,
+        'tcga_surv': tcga_surv,
+        'orien_surv': orien_surv
+    }
 
 def load_consensus_genes(k_dir: Path) -> List[str]:
     """Load consensus genes for a k-value."""
@@ -154,9 +177,10 @@ def train_and_test_direction_single_seed(
     target_cohort: str,
     source_params: Dict,
     consensus_genes: List[str],
-    data_dir: Path,
+    data_dict: Dict,
     config: dict,
     seed: int,
+    k: int,
     device: str = None,
     epochs: int = 150,
     output_dir: Path = None
@@ -206,14 +230,10 @@ def train_and_test_direction_single_seed(
     logger.info(f"Training for {training_epochs} epochs")
     
     # Load RAW data
-    tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
-    orien_expr_raw = pd.read_csv(data_dir / "raw" / "orien_batch_corrected.csv", index_col=0)
-    tcga_surv = pd.read_csv(data_dir / "processed" / "surv_tcga_harmonized.csv", index_col=0)
-    orien_surv = pd.read_csv(data_dir / "processed" / "surv_orien_harmonized.csv", index_col=0)
-    
-    # Filter to consensus genes
-    tcga_expr_raw = tcga_expr_raw.loc[consensus_genes]
-    orien_expr_raw = orien_expr_raw.loc[consensus_genes]
+    tcga_expr_raw = data_dict['tcga_expr_raw'].loc[consensus_genes]
+    orien_expr_raw = data_dict['orien_expr_raw'].loc[consensus_genes]
+    tcga_surv = data_dict['tcga_surv']
+    orien_surv = data_dict['orien_surv']
     
     # Determine source and target data
     if source_cohort.lower() == 'tcga':
@@ -290,17 +310,17 @@ def train_and_test_direction_single_seed(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
     # Train for scaled_epochs, tracking both train and test performance
-    logger.info(f"Training for {scaled_epochs} epochs (tracking test for analysis)...")
+    logger.info(f"Training for {training_epochs} epochs (tracking test for analysis)...")
     
     training_history = []
     best_test_cindex = 0.0
     best_test_epoch = 0
     
-    for epoch in range(scaled_epochs):
+    for epoch in range(training_epochs):
         train_loss = train_epoch_manual(model, source_loader, optimizer, device)
         
         # Evaluate every 5 epochs or at start/end
-        if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == scaled_epochs - 1:
+        if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == training_epochs - 1:
             train_cindex = evaluate_model(model, source_loader, device)
             test_cindex = evaluate_model(model, target_loader, device)
             
@@ -316,7 +336,7 @@ def train_and_test_direction_single_seed(
                 best_test_cindex = test_cindex
                 best_test_epoch = epoch + 1
             
-            logger.info(f"  Epoch {epoch+1}/{scaled_epochs}: Loss={train_loss:.4f}, "
+            logger.info(f"  Epoch {epoch+1}/{training_epochs}: Loss={train_loss:.4f}, "
                        f"Train={train_cindex:.4f}, Test={test_cindex:.4f}")
     
     # Final evaluation
@@ -360,7 +380,7 @@ def train_and_test_direction_single_seed(
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(plot_dir / f'{source_cohort}_to_{target_cohort}_seed{seed}.png', 
+        plt.savefig(plot_dir / f'k{k:03d}_{source_cohort}_to_{target_cohort}_seed{seed}.png', 
                    dpi=150, bbox_inches='tight')
         plt.close()
     
@@ -373,8 +393,7 @@ def train_and_test_direction_single_seed(
         'best_test_cindex': best_test_cindex,
         'best_test_epoch': best_test_epoch,
         'architecture': hidden_sizes,
-        'cv_derived_epochs': cv_derived_epochs,
-        'scaled_epochs': scaled_epochs,
+        'training_epochs': training_epochs,
         'n_source_samples': n_source_samples,
         'training_history': training_history
     }
@@ -385,8 +404,9 @@ def train_and_test_direction_multi_seed(
     target_cohort: str,
     source_params: Dict,
     consensus_genes: List[str],
-    data_dir: Path,
+    data_dict: Dict,
     config: dict,
+    k: int,
     seeds: List[int] = SEEDS,
     device: str = None,
     epochs: int = 150,
@@ -408,9 +428,10 @@ def train_and_test_direction_multi_seed(
                 target_cohort=target_cohort,
                 source_params=source_params,
                 consensus_genes=consensus_genes,
-                data_dir=data_dir,
+                data_dict=data_dict,
                 config=config,
                 seed=seed,
+                k=k,
                 device=device,
                 epochs=epochs,
                 output_dir=output_dir
@@ -462,7 +483,7 @@ def cross_cohort_validation(
     orien_params: Dict,
     k: int,
     output_dir: Path,
-    data_dir: Path,
+    data_dict: Dict,
     seeds: List[int] = SEEDS,
     epochs: int = 150
 ) -> Dict:
@@ -495,13 +516,15 @@ def cross_cohort_validation(
     config['data']['standardize'] = True
     
     # Direction 1: ORIEN → TCGA
+    # Direction 1: ORIEN → TCGA
     o2t_results = train_and_test_direction_multi_seed(
         source_cohort='orien',
         target_cohort='tcga',
         source_params=orien_params,
         consensus_genes=consensus_genes,
-        data_dir=data_dir,
+        data_dict=data_dict,
         config=config,
+        k=k,
         seeds=seeds,
         epochs=epochs,
         output_dir=validation_dir
@@ -513,8 +536,9 @@ def cross_cohort_validation(
         target_cohort='orien',
         source_params=tcga_params,
         consensus_genes=consensus_genes,
-        data_dir=data_dir,
+        data_dict=data_dict,
         config=config,
+        k=k,
         seeds=seeds,
         epochs=epochs,
         output_dir=validation_dir
@@ -668,7 +692,7 @@ def main():
     logger.info(f"Epochs: {epochs}")
     logger.info("Method: Train on 100% source cohort")
     logger.info("="*80)
-    
+    data_dict = load_expression_and_survival_data(data_dir)
     # Find all k-value directories
     k_dirs = sorted([d for d in input_dir.iterdir() 
                      if d.is_dir() and d.name.startswith('k') and d.name[1:].isdigit()])
@@ -707,7 +731,7 @@ def main():
                 orien_params=orien_params,
                 k=k,
                 output_dir=input_dir,
-                data_dir=data_dir,
+                data_dict=data_dict,
                 seeds=seeds,
                 epochs=args.epochs
             )
