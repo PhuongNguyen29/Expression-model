@@ -38,6 +38,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from scipy import stats
+from sklearn.model_selection import train_test_split
 
 # Add project root to path
 project_root = Path(__file__).resolve().parent
@@ -220,12 +221,12 @@ def load_model(
         hidden_sizes=hidden_sizes,
         dropout=params.get('dropout', 0.3),
         activation=params.get('activation', 'relu'),
-        batch_norm=True,  # Always True due to bug - matches saved checkpoints
+        batch_norm=params.get('batch_norm', True),  
         weight_init=params.get('weight_init', 'kaiming_uniform'),
         l1_ratio=params.get('l1_ratio', 0.5),
         alpha=params.get('alpha', 0.001)
     )
-    
+    logger.info(f"  batch_norm: {params.get('batch_norm', True)}")
     # Load weights
     state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
     model.load_state_dict(state_dict)
@@ -367,6 +368,7 @@ def run_convergence_sensitivity_analysis(
     expr_tensor: torch.Tensor,
     baseline: torch.Tensor,
     gene_names: list,
+    events: np.ndarray,
     device: str,
     logger: logging.Logger,
     n_steps_list: list = [20, 50, 100, 200]
@@ -398,7 +400,7 @@ def run_convergence_sensitivity_analysis(
     
     # Use subset of samples for efficiency
     n_samples_test = min(100, expr_tensor.shape[0])
-    test_indices = np.random.choice(expr_tensor.shape[0], n_samples_test, replace=False)
+    _, test_indices = train_test_split(np.arange(len(events)), test_size =  n_samples_test, stratify=events, random_state=42)
     test_tensor = expr_tensor[test_indices]
     test_baseline = baseline.expand(n_samples_test, -1)
     
@@ -887,6 +889,7 @@ def compute_shap_gradientexplainer(
     model: nn.Module,
     expr_tensor: torch.Tensor,
     gene_names: list,
+    events: np.ndarray,
     device: str,
     logger: logging.Logger,
     n_background: int = 100
@@ -904,7 +907,13 @@ def compute_shap_gradientexplainer(
     if n_background >= n_samples:
         background_idx = np.arange(n_samples)
     else:
-        np.random.seed(42)
+        _, background_idx = train_test_split(
+        np.arange(n_samples),
+        test_size=n_background,
+        stratify=events,
+        random_state=42)
+        logger.info(f"  Background event rate: {events[background_idx].mean():.1%} "
+                f"(dataset: {events.mean():.1%})")
         background_idx = np.random.choice(n_samples, n_background, replace=False)
     
     background = expr_tensor[background_idx].to(device)
@@ -1031,7 +1040,8 @@ def process_cohort(
     logger: logging.Logger,
     n_steps: int = 50,
     validate_convergence: bool = True,
-    save_per_sample: bool = True
+    save_per_sample: bool = True,
+    compute_shap: bool = True
 ) -> pd.DataFrame:
     """Process a single cohort."""
     logger.info("\n" + "="*70)
@@ -1042,6 +1052,10 @@ def process_cohort(
     expr_df, expr_tensor, sample_ids, gene_names = load_expression_data(
         expr_file, surv_file, consensus_genes, logger
     )
+    # Load survival data to get events for stratified SHAP background
+    surv_df = pd.read_csv(surv_file, index_col=0)
+    surv_df = surv_df.loc[sample_ids]
+    events = surv_df['event'].values
     
     # Load model
     model = load_model(model_path, params_path, len(gene_names), logger)
@@ -1055,10 +1069,14 @@ def process_cohort(
         device, logger, n_steps=n_steps, validate=validate_convergence
     )
     
-    # Compute SHAP GradientExplainer
-    shap_results = compute_shap_gradientexplainer(
-        model, expr_tensor, gene_names, device, logger
-    )
+    if compute_shap:
+        shap_results = compute_shap_gradientexplainer(
+            model, expr_tensor, gene_names, events, device, logger
+        )
+    else:
+        shap_results = None
+        logger.info("Skipping SHAP computation (--no_shap flag)")
+
     
     # Compare methods
     comparison_df = compare_importance_methods(
@@ -1090,6 +1108,8 @@ def main():
                         help='Run n_steps sensitivity analysis')
     parser.add_argument('--no_per_sample', action='store_true',
                         help='Skip saving per-sample attributions')
+    parser.add_argument('--no_shap', action='store_true',
+                    help='Skip SHAP computation (faster, less memory)')
     
     args = parser.parse_args()
     
@@ -1149,20 +1169,26 @@ def main():
         logger.info("="*70)
         
         # Load TCGA for sensitivity analysis
-        _, expr_tensor, _, gene_names = load_expression_data(
+        _, expr_tensor, sample_ids, gene_names = load_expression_data(
             TCGA_EXPR_FILE, TCGA_SURV_FILE, consensus_genes, logger
         )
+        surv_df = pd.read_csv(TCGA_SURV_FILE, index_col=0)
+        surv_df = surv_df.loc[sample_ids]  # Align with expression samples
+        events = surv_df['event'].values
+        
+        logger.info(f"  Event distribution: {events.sum()}/{len(events)} ({100*events.mean():.1f}%)")
+        
         model = load_model(tcga_model_path, tcga_params_path, len(gene_names), logger)
         baseline = expr_tensor.mean(dim=0, keepdim=True)
         
         sensitivity_df = run_convergence_sensitivity_analysis(
-            model, expr_tensor, baseline, gene_names,
+            model, expr_tensor, baseline, gene_names, events,
             device, logger, n_steps_list=[20, 50, 100, 200]
         )
         
         sensitivity_df.to_csv(seed_output_dir / 'convergence_sensitivity_analysis.csv', index=False)
         logger.info(f"Saved sensitivity analysis to {seed_output_dir}")
-    
+        
     # Process TCGA
     tcga_comparison = process_cohort(
         cohort='tcga',
@@ -1176,7 +1202,8 @@ def main():
         logger=logger,
         n_steps=args.n_steps,
         validate_convergence=args.validate_convergence,
-        save_per_sample=not args.no_per_sample
+        save_per_sample=not args.no_per_sample,
+        compute_shap=not args.no_shap
     )
     
     # Process ORIEN
@@ -1192,7 +1219,8 @@ def main():
         logger=logger,
         n_steps=args.n_steps,
         validate_convergence=args.validate_convergence,
-        save_per_sample=not args.no_per_sample
+        save_per_sample=not args.no_per_sample,
+        compute_shap=not args.no_shap
     )
     
     # Final summary
