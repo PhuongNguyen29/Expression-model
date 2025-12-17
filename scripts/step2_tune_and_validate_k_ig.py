@@ -659,7 +659,7 @@ def tune_for_k_value(
             'best_cv_cindex': study.best_value,
             'n_trials': n_trials,
             'importance_method': 'integrated_gradients',
-            'cv_epochs_info': cv_epochs_info  # Option 2: CV-derived epochs
+            'cv_epochs_info': cv_epochs_info  
         }
         
         with open(tuning_dir / 'best_params.json', 'w') as f:

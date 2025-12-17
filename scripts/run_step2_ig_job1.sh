@@ -3,7 +3,7 @@
 #$ -cwd
 #$ -V
 #$ -q UI
-#$ -pe smp 16
+#$ -pe smp 24
 #$ -l mem_free=32G
 #$ -o $HOME/Expression-model/logs/step2_ig_job1_$JOB_ID.out
 #$ -e $HOME/Expression-model/logs/step2_ig_job1_$JOB_ID.err
@@ -11,7 +11,7 @@
 #$ -M thingnguyen@uiowa.edu
 
 # Job 1: k=80, 90
-K_VALUES="80 90"
+K_VALUES="50 60 70 80"
 N_TRIALS=50
 
 PROJECT_DIR="$HOME/Expression-model"

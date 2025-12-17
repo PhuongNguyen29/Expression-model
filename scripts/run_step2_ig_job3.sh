@@ -3,7 +3,7 @@
 #$ -cwd
 #$ -V
 #$ -q UI
-#$ -pe smp 16
+#$ -pe smp 24
 #$ -l mem_free=32G
 #$ -o $HOME/Expression-model/logs/step2_ig_job3_$JOB_ID.out
 #$ -e $HOME/Expression-model/logs/step2_ig_job3_$JOB_ID.err
