@@ -743,13 +743,13 @@ def save_convergence_results(
         # Summary JSON
         summary = {
             'cohort': cohort,
-            'converged': conv_results['converged'],
-            'tolerance': conv_results['tolerance'],
-            'mean_relative_error': conv_results['mean_relative_error'],
-            'max_relative_error': conv_results['max_relative_error'],
-            'pct_within_tolerance': conv_results['pct_within_tolerance'],
-            'n_samples': conv_results['n_samples'],
-            'n_steps': ig_results['n_steps']
+            'converged': bool(conv_results['converged']),
+            'tolerance': float(conv_results['tolerance']),
+            'mean_relative_error': float(conv_results['mean_relative_error']),
+            'max_relative_error': float(conv_results['max_relative_error']),
+            'pct_within_tolerance': float(conv_results['pct_within_tolerance']),
+            'n_samples': int(conv_results['n_samples']),
+            'n_steps': int(ig_results['n_steps'])
         }
         
         with open(conv_dir / f'{cohort}_convergence_summary.json', 'w') as f:
