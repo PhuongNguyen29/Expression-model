@@ -1,19 +1,25 @@
 """
 Compute Feature Importance using Integrated Gradients and SHAP
+Version 2: Added convergence validation and per-sample attribution saving
 
 This script computes gene importance scores using:
 1. Integrated Gradients (Captum) - primary method
 2. SHAP GradientExplainer - for validation
 
-Replaces L2 norm importance which showed compression issues,
-especially for ORIEN's 3-layer architecture.
+NEW IN V2:
+- Convergence validation (completeness axiom check)
+- Per-sample attribution saving for downstream analysis
+- Sensitivity analysis for n_steps parameter
 
 References:
 - Sundararajan et al. (2017) "Axiomatic Attribution for Deep Networks" - ICML
 - Lundberg & Lee (2017) "A Unified Approach to Interpreting Model Predictions" - NeurIPS
+- Kokhlikyan et al. (2020) "Captum: A unified and generic model interpretability library" - arXiv
 
 Usage:
-    python compute_shap_ig_importance.py --seed 42
+    python compute_shap_ig_importance_v2.py --seed 42
+    python compute_shap_ig_importance_v2.py --seed 42 --validate_convergence
+    python compute_shap_ig_importance_v2.py --seed 42 --n_steps 100
 
 Author: Phuong Nguyen
 Date: December 2024
@@ -71,26 +77,6 @@ ORIEN_EXPR_FILE = DATA_DIR / "raw" / "orien_batch_corrected.csv"
 # Survival data (for sample alignment)
 TCGA_SURV_FILE = DATA_DIR / "processed" / "surv_tcga_harmonized.csv"
 ORIEN_SURV_FILE = DATA_DIR / "processed" / "surv_orien_harmonized.csv"
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def get_top_k_genes_as_set(gene_names, importance, k=50):
-    """Safely get top-k genes as a set of strings."""
-    imp = np.array(importance).flatten()
-    indices = np.argsort(-imp)[:k]
-    result = set()
-    for i in indices:
-        idx = i.item() if hasattr(i, 'item') else int(i)
-        if hasattr(gene_names, 'iloc'):
-            gene = str(gene_names.iloc[idx])
-        elif isinstance(gene_names, np.ndarray):
-            gene = str(gene_names.flat[idx])
-        else:
-            gene = str(gene_names[idx])
-        result.add(gene)
-    return result
 
 
 # =============================================================================
@@ -153,6 +139,7 @@ def load_expression_data(
         expr_df: Expression DataFrame (genes x samples)
         expr_tensor: Standardized expression tensor (samples x genes)
         sample_ids: List of sample IDs
+        gene_names: List of gene names (filtered)
     """
     logger.info(f"Loading expression data from {expr_file.name}")
     
@@ -208,9 +195,6 @@ def load_model(
 ) -> ElasticDeepSurv:
     """
     Load trained model with correct architecture.
-    
-    Note: Due to a bug in ElasticDeepSurv, all models were trained with
-    batch_norm=True regardless of config. We reconstruct accordingly.
     """
     logger.info(f"Loading model from {model_path.name}")
     
@@ -231,8 +215,6 @@ def load_model(
     logger.info(f"  Architecture: {n_features} -> {hidden_sizes} -> 1")
     
     # Create model
-    # Note: batch_norm=True for all due to ElasticDeepSurv bug
-    # The parent DeepSurv class uses default batch_norm=True
     model = ElasticDeepSurv(
         n_features=n_features,
         hidden_sizes=hidden_sizes,
@@ -251,6 +233,9 @@ def load_model(
     # Set to evaluation mode (critical for batch norm)
     model.eval()
     
+    # Verify model is in eval mode
+    logger.info(f"  Model training mode: {model.training} (should be False)")
+    
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"  Parameters: {n_params:,}")
@@ -259,35 +244,252 @@ def load_model(
 
 
 # =============================================================================
-# Integrated Gradients Computation
+# Convergence Validation (Completeness Check)
+# =============================================================================
+
+def validate_convergence(
+    model: nn.Module,
+    expr_tensor: torch.Tensor,
+    attributions: np.ndarray,
+    baseline: torch.Tensor,
+    device: str,
+    logger: logging.Logger,
+    tolerance: float = 0.05
+) -> dict:
+    """
+    Validate Integrated Gradients convergence using the completeness axiom.
+    
+    The completeness axiom states:
+        sum(IG_i(x)) = F(x) - F(baseline)
+    
+    Args:
+        model: Trained model
+        expr_tensor: Input expression tensor (samples x genes)
+        attributions: Computed IG attributions (samples x genes)
+        baseline: Baseline tensor (1 x genes)
+        device: 'cuda' or 'cpu'
+        logger: Logger instance
+        tolerance: Acceptable relative error threshold (default 5%)
+        
+    Returns:
+        Dictionary with convergence statistics
+    """
+    logger.info("\n" + "="*60)
+    logger.info("CONVERGENCE VALIDATION (Completeness Axiom)")
+    logger.info("="*60)
+    
+    model = model.to(device)
+    model.eval()
+    
+    n_samples = expr_tensor.shape[0]
+    
+    # Compute model outputs
+    with torch.no_grad():
+        # Output for all samples
+        outputs = model(expr_tensor.to(device)).cpu().numpy().flatten()
+        
+        # Output for baseline
+        baseline_output = model(baseline.to(device)).cpu().numpy().flatten()[0]
+    
+    logger.info(f"  Baseline output F(x'): {baseline_output:.6f}")
+    logger.info(f"  Sample outputs F(x) range: [{outputs.min():.6f}, {outputs.max():.6f}]")
+    
+    # Compute expected difference: F(x) - F(baseline)
+    expected_diff = outputs - baseline_output
+    
+    # Compute actual sum of attributions
+    attribution_sums = attributions.sum(axis=1)
+    
+    # Compute approximation errors
+    absolute_errors = np.abs(expected_diff - attribution_sums)
+    
+    # Compute relative errors (with small epsilon to avoid division by zero)
+    epsilon = 1e-7
+    relative_errors = absolute_errors / (np.abs(expected_diff) + epsilon)
+    
+    # Statistics
+    mean_abs_error = absolute_errors.mean()
+    max_abs_error = absolute_errors.max()
+    mean_rel_error = relative_errors.mean()
+    max_rel_error = relative_errors.max()
+    
+    # Count samples meeting tolerance
+    samples_within_tolerance = (relative_errors < tolerance).sum()
+    pct_within_tolerance = 100 * samples_within_tolerance / n_samples
+    
+    # Log results
+    logger.info(f"\n  Convergence Statistics:")
+    logger.info(f"    Mean absolute error: {mean_abs_error:.6f}")
+    logger.info(f"    Max absolute error:  {max_abs_error:.6f}")
+    logger.info(f"    Mean relative error: {mean_rel_error:.4f} ({100*mean_rel_error:.2f}%)")
+    logger.info(f"    Max relative error:  {max_rel_error:.4f} ({100*max_rel_error:.2f}%)")
+    logger.info(f"    Samples within {100*tolerance:.0f}% tolerance: "
+                f"{samples_within_tolerance}/{n_samples} ({pct_within_tolerance:.1f}%)")
+    
+    # Determine if convergence is acceptable
+    converged = (mean_rel_error < tolerance) and (pct_within_tolerance >= 95)
+    
+    if converged:
+        logger.info(f"\n  ✓ CONVERGENCE VALIDATED")
+        logger.info(f"    Mean relative error ({100*mean_rel_error:.2f}%) < {100*tolerance:.0f}%")
+        logger.info(f"    {pct_within_tolerance:.1f}% samples within tolerance (>= 95% required)")
+    else:
+        logger.warning(f"\n  ⚠ CONVERGENCE WARNING")
+        if mean_rel_error >= tolerance:
+            logger.warning(f"    Mean relative error ({100*mean_rel_error:.2f}%) >= {100*tolerance:.0f}%")
+        if pct_within_tolerance < 95:
+            logger.warning(f"    Only {pct_within_tolerance:.1f}% samples within tolerance (< 95%)")
+        logger.warning(f"    Consider increasing n_steps for better approximation")
+    
+    # Compile results
+    results = {
+        'converged': converged,
+        'tolerance': tolerance,
+        'mean_absolute_error': float(mean_abs_error),
+        'max_absolute_error': float(max_abs_error),
+        'mean_relative_error': float(mean_rel_error),
+        'max_relative_error': float(max_rel_error),
+        'samples_within_tolerance': int(samples_within_tolerance),
+        'pct_within_tolerance': float(pct_within_tolerance),
+        'n_samples': n_samples,
+        'baseline_output': float(baseline_output),
+        'expected_diff': expected_diff.tolist(),
+        'attribution_sums': attribution_sums.tolist(),
+        'absolute_errors': absolute_errors.tolist(),
+        'relative_errors': relative_errors.tolist()
+    }
+    
+    return results
+
+
+def run_convergence_sensitivity_analysis(
+    model: nn.Module,
+    expr_tensor: torch.Tensor,
+    baseline: torch.Tensor,
+    gene_names: list,
+    device: str,
+    logger: logging.Logger,
+    n_steps_list: list = [20, 50, 100, 200]
+) -> pd.DataFrame:
+    """
+    Run sensitivity analysis for different n_steps values.
+    
+    This helps determine the minimum n_steps needed for convergence.
+    
+    Args:
+        model: Trained model
+        expr_tensor: Input expression tensor
+        baseline: Baseline tensor
+        gene_names: List of gene names
+        device: 'cuda' or 'cpu'
+        logger: Logger instance
+        n_steps_list: List of n_steps values to test
+        
+    Returns:
+        DataFrame with convergence statistics for each n_steps
+    """
+    logger.info("\n" + "="*60)
+    logger.info("CONVERGENCE SENSITIVITY ANALYSIS")
+    logger.info("="*60)
+    logger.info(f"Testing n_steps: {n_steps_list}")
+    
+    model = model.to(device)
+    model.eval()
+    
+    # Use subset of samples for efficiency
+    n_samples_test = min(100, expr_tensor.shape[0])
+    test_indices = np.random.choice(expr_tensor.shape[0], n_samples_test, replace=False)
+    test_tensor = expr_tensor[test_indices]
+    test_baseline = baseline.expand(n_samples_test, -1)
+    
+    logger.info(f"Using {n_samples_test} samples for sensitivity analysis")
+    
+    results = []
+    
+    for n_steps in n_steps_list:
+        logger.info(f"\n  Testing n_steps = {n_steps}...")
+        
+        # Create IG with this n_steps
+        ig = IntegratedGradients(model)
+        
+        # Compute attributions
+        attributions = ig.attribute(
+            test_tensor.to(device),
+            baselines=test_baseline.to(device),
+            n_steps=n_steps,
+            return_convergence_delta=False
+        ).cpu().numpy()
+        
+        # Validate convergence
+        conv_results = validate_convergence(
+            model, test_tensor, attributions, baseline,
+            device, logger, tolerance=0.05
+        )
+        
+        results.append({
+            'n_steps': n_steps,
+            'mean_relative_error': conv_results['mean_relative_error'],
+            'max_relative_error': conv_results['max_relative_error'],
+            'pct_within_5pct': conv_results['pct_within_tolerance'],
+            'converged': conv_results['converged']
+        })
+    
+    # Create summary DataFrame
+    summary_df = pd.DataFrame(results)
+    
+    logger.info("\n" + "="*60)
+    logger.info("SENSITIVITY ANALYSIS SUMMARY")
+    logger.info("="*60)
+    logger.info("\n" + summary_df.to_string(index=False))
+    
+    # Recommend optimal n_steps
+    converged_steps = summary_df[summary_df['converged']]['n_steps'].tolist()
+    if converged_steps:
+        recommended = min(converged_steps)
+        logger.info(f"\n  Recommended n_steps: {recommended} (minimum for convergence)")
+    else:
+        logger.warning(f"\n  ⚠ No n_steps value achieved convergence. Consider n_steps > {max(n_steps_list)}")
+    
+    return summary_df
+
+
+# =============================================================================
+# Integrated Gradients Computation (Enhanced)
 # =============================================================================
 
 def compute_integrated_gradients(
     model: nn.Module,
     expr_tensor: torch.Tensor,
     gene_names: list,
+    sample_ids: list,
     device: str,
     logger: logging.Logger,
-    n_steps: int = 50
+    n_steps: int = 50,
+    validate: bool = True
 ) -> dict:
     """
-    Compute Integrated Gradients attributions.
+    Compute Integrated Gradients attributions with convergence validation.
     
     Args:
         model: Trained ElasticDeepSurv model
         expr_tensor: Expression tensor (samples x genes)
         gene_names: List of gene names
+        sample_ids: List of sample IDs (for per-sample output)
         device: 'cuda' or 'cpu'
         logger: Logger instance
         n_steps: Number of integration steps (default 50)
+        validate: Whether to run convergence validation (default True)
         
     Returns:
-        Dictionary with attribution results
+        Dictionary with attribution results including convergence info
     """
-    logger.info("Computing Integrated Gradients...")
+    logger.info("\n" + "="*60)
+    logger.info("COMPUTING INTEGRATED GRADIENTS")
+    logger.info("="*60)
     logger.info(f"  Samples: {expr_tensor.shape[0]}")
     logger.info(f"  Genes: {expr_tensor.shape[1]}")
     logger.info(f"  Integration steps: {n_steps}")
+    logger.info(f"  Convergence validation: {validate}")
     
     # Move model and data to device
     model = model.to(device)
@@ -297,7 +499,11 @@ def compute_integrated_gradients(
     # Compute mean baseline (average patient)
     baseline = expr_tensor.mean(dim=0, keepdim=True)  # Shape: (1, n_genes)
     logger.info(f"  Baseline shape: {baseline.shape}")
-    logger.info(f"  Baseline mean: {baseline.mean():.4f}")
+    logger.info(f"  Baseline mean: {baseline.mean():.6f}")
+    logger.info(f"  Baseline std: {baseline.std():.6f}")
+    
+    # Note: Since data is z-scored, baseline should be approximately zero
+    logger.info(f"  Baseline L2 norm: {torch.norm(baseline):.6f} (should be small for z-scored data)")
     
     # Expand baseline to match input size for batch processing
     baseline_expanded = baseline.expand(expr_tensor.shape[0], -1)
@@ -306,41 +512,48 @@ def compute_integrated_gradients(
     ig = IntegratedGradients(model)
     
     # Compute attributions
-    # Note: target=None for single-output regression
     logger.info("  Computing attributions (this may take a few minutes)...")
     
     # Process in batches to avoid memory issues
     batch_size = 100
     n_samples = expr_tensor.shape[0]
     all_attributions = []
+    all_deltas = []  # For convergence check
     
     for i in range(0, n_samples, batch_size):
         end_idx = min(i + batch_size, n_samples)
         batch_inputs = expr_tensor[i:end_idx]
         batch_baselines = baseline_expanded[i:end_idx]
         
-        with torch.no_grad():
-            # Need gradients for IG
-            pass
-        
-        attributions = ig.attribute(
+        # Compute attributions with convergence delta
+        attributions, delta = ig.attribute(
             batch_inputs,
             baselines=batch_baselines,
             n_steps=n_steps,
-            return_convergence_delta=False
+            return_convergence_delta=True
         )
         
         all_attributions.append(attributions.cpu())
+        all_deltas.append(delta.cpu())
         
-        if (i // batch_size + 1) % 5 == 0:
+        if (i // batch_size + 1) % 5 == 0 or end_idx == n_samples:
             logger.info(f"    Processed {end_idx}/{n_samples} samples")
     
     # Concatenate all attributions
     attributions = torch.cat(all_attributions, dim=0)
+    convergence_deltas = torch.cat(all_deltas, dim=0)
+    
     logger.info(f"  Attributions shape: {attributions.shape}")
     
     # Convert to numpy
     attributions_np = attributions.numpy()
+    deltas_np = convergence_deltas.numpy().flatten()
+    
+    # Log convergence delta statistics (Captum's built-in check)
+    logger.info(f"\n  Captum Convergence Deltas:")
+    logger.info(f"    Mean |delta|: {np.abs(deltas_np).mean():.6f}")
+    logger.info(f"    Max |delta|:  {np.abs(deltas_np).max():.6f}")
+    logger.info(f"    Std delta:    {deltas_np.std():.6f}")
     
     # Compute aggregated importance scores
     # 1. Mean absolute attribution (magnitude)
@@ -352,358 +565,208 @@ def compute_integrated_gradients(
     # 3. Standard deviation (variability across samples)
     importance_std = attributions_np.std(axis=0)
     
+    # 4. Median absolute attribution (robust to outliers)
+    importance_median = np.median(np.abs(attributions_np), axis=0)
+    
     # Log statistics
-    logger.info(f"\n  Importance Statistics (Magnitude):")
+    logger.info(f"\n  Importance Statistics (Magnitude - Mean |IG|):")
     logger.info(f"    Range: [{importance_magnitude.min():.6f}, {importance_magnitude.max():.6f}]")
     logger.info(f"    Mean: {importance_magnitude.mean():.6f}")
     logger.info(f"    Std: {importance_magnitude.std():.6f}")
     logger.info(f"    CV: {importance_magnitude.std() / importance_magnitude.mean():.4f}")
     
-    logger.info(f"\n  Importance Statistics (Signed):")
+    logger.info(f"\n  Importance Statistics (Signed - Mean IG):")
     logger.info(f"    Range: [{importance_signed.min():.6f}, {importance_signed.max():.6f}]")
     logger.info(f"    Mean: {importance_signed.mean():.6f}")
-    logger.info(f"    Positive (hazardous): {(importance_signed > 0).sum()}")
-    logger.info(f"    Negative (protective): {(importance_signed < 0).sum()}")
+    logger.info(f"    Positive (risk): {(importance_signed > 0).sum()} genes")
+    logger.info(f"    Negative (protective): {(importance_signed < 0).sum()} genes")
+    
+    # Run full convergence validation if requested
+    convergence_results = None
+    if validate:
+        convergence_results = validate_convergence(
+            model, expr_tensor.cpu(), attributions_np, baseline.cpu(),
+            device, logger, tolerance=0.05
+        )
     
     # Create results dictionary
     results = {
+        # Per-sample attributions (full matrix)
         'attributions_per_sample': attributions_np,  # (n_samples, n_genes)
+        'sample_ids': sample_ids,  # For mapping back to patients
+        
+        # Aggregated importance scores
         'importance_magnitude': importance_magnitude,  # (n_genes,)
         'importance_signed': importance_signed,  # (n_genes,)
         'importance_std': importance_std,  # (n_genes,)
+        'importance_median': importance_median,  # (n_genes,)
+        
+        # Gene names
         'gene_names': gene_names,
+        
+        # Metadata
         'n_samples': n_samples,
+        'n_genes': len(gene_names),
         'n_steps': n_steps,
-        'baseline_type': 'mean'
+        'baseline_type': 'mean',
+        'baseline_values': baseline.cpu().numpy().flatten(),
+        
+        # Convergence information
+        'convergence_deltas': deltas_np,  # Captum's convergence delta per sample
+        'convergence_results': convergence_results  # Full validation results
     }
     
     return results
 
 
 # =============================================================================
-# SHAP GradientExplainer Computation
+# Save Results (Enhanced)
 # =============================================================================
 
-def compute_shap_gradientexplainer(
-    model: nn.Module,
-    expr_tensor: torch.Tensor,
-    gene_names: list,
-    device: str,
-    logger: logging.Logger,
-    n_background: int = 100
-) -> dict:
+def save_per_sample_attributions(
+    cohort: str,
+    ig_results: dict,
+    output_dir: Path,
+    logger: logging.Logger
+):
     """
-    Compute SHAP values using GradientExplainer.
+    Save per-sample attributions to files.
     
-    GradientExplainer is more robust to batch normalization than DeepExplainer.
+    Saves:
+    1. Full attribution matrix (samples x genes) as CSV
+    2. Full attribution matrix as NPY for efficient loading
+    3. Sample metadata file
     
     Args:
-        model: Trained ElasticDeepSurv model
-        expr_tensor: Expression tensor (samples x genes)
-        gene_names: List of gene names
-        device: 'cuda' or 'cpu'
+        cohort: 'tcga' or 'orien'
+        ig_results: Dictionary from compute_integrated_gradients
+        output_dir: Output directory
         logger: Logger instance
-        n_background: Number of background samples
-        
-    Returns:
-        Dictionary with SHAP results
     """
-    logger.info("Computing SHAP GradientExplainer...")
-    logger.info(f"  Background samples: {n_background}")
+    logger.info(f"\n  Saving per-sample attributions for {cohort.upper()}...")
     
-    # Move model to device and set to eval
-    model = model.to(device)
-    model.eval()
+    # Create per-sample directory
+    per_sample_dir = output_dir / "per_sample_attributions"
+    per_sample_dir.mkdir(parents=True, exist_ok=True)
     
-    # Select background samples (random subset)
-    n_samples = expr_tensor.shape[0]
-    if n_background >= n_samples:
-        background_idx = np.arange(n_samples)
-    else:
-        np.random.seed(42)  # Reproducibility
-        background_idx = np.random.choice(n_samples, n_background, replace=False)
-    
-    background = expr_tensor[background_idx].to(device)
-    logger.info(f"  Background shape: {background.shape}")
-    
-    # Create GradientExplainer
-    try:
-        explainer = shap.GradientExplainer(model, background)
-        logger.info("  GradientExplainer created successfully")
-    except Exception as e:
-        logger.error(f"  Failed to create GradientExplainer: {e}")
-        return None
-    
-    # Compute SHAP values
-    logger.info("  Computing SHAP values (this may take several minutes)...")
-    
-    # Move all data to device
-    expr_device = expr_tensor.to(device)
-    
-    try:
-        shap_values = explainer.shap_values(expr_device)
-        
-        # Handle different return formats
-        if isinstance(shap_values, list):
-            shap_values = shap_values[0]
-        
-        # Convert to numpy if tensor
-        if torch.is_tensor(shap_values):
-            shap_values = shap_values.cpu().numpy()
-            
-    except Exception as e:
-        logger.error(f"  Failed to compute SHAP values: {e}")
-        logger.info("  Trying with smaller batches...")
-        
-        # Try batch processing
-        batch_size = 50
-        all_shap = []
-        
-        for i in range(0, n_samples, batch_size):
-            end_idx = min(i + batch_size, n_samples)
-            batch = expr_tensor[i:end_idx].to(device)
-            
-            try:
-                batch_shap = explainer.shap_values(batch)
-                if isinstance(batch_shap, list):
-                    batch_shap = batch_shap[0]
-                if torch.is_tensor(batch_shap):
-                    batch_shap = batch_shap.cpu().numpy()
-                all_shap.append(batch_shap)
-                
-                if (i // batch_size + 1) % 5 == 0:
-                    logger.info(f"    Processed {end_idx}/{n_samples} samples")
-                    
-            except Exception as batch_e:
-                logger.error(f"  Batch {i}-{end_idx} failed: {batch_e}")
-                return None
-        
-        shap_values = np.concatenate(all_shap, axis=0)
-    
-    logger.info(f"  SHAP values shape: {shap_values.shape}")
-    
-    # Compute aggregated importance
-    importance_magnitude = np.abs(shap_values).mean(axis=0)
-    importance_signed = shap_values.mean(axis=0)
-    importance_std = shap_values.std(axis=0)
-    
-    # Log statistics
-    logger.info(f"\n  SHAP Importance Statistics (Magnitude):")
-    logger.info(f"    Range: [{importance_magnitude.min():.6f}, {importance_magnitude.max():.6f}]")
-    logger.info(f"    Mean: {importance_magnitude.mean():.6f}")
-    logger.info(f"    Std: {importance_magnitude.std():.6f}")
-    logger.info(f"    CV: {importance_magnitude.std() / importance_magnitude.mean():.4f}")
-    
-    results = {
-        'shap_values_per_sample': shap_values,
-        'importance_magnitude': importance_magnitude,
-        'importance_signed': importance_signed,
-        'importance_std': importance_std,
-        'gene_names': gene_names,
-        'n_samples': n_samples,
-        'n_background': n_background
-    }
-    
-    return results
-
-
-# =============================================================================
-# L2 Importance (for comparison)
-# =============================================================================
-
-def compute_l2_importance(
-    model: nn.Module,
-    gene_names: list,
-    logger: logging.Logger
-) -> dict:
-    """
-    Compute L2 norm importance from first layer weights.
-    This is the current method - included for comparison.
-    """
-    logger.info("Computing L2 norm importance (current method)...")
-    
-    # Get first layer
-    first_layer = model.network[0]
-    if not isinstance(first_layer, nn.Linear):
-        raise TypeError(f"First layer is {type(first_layer)}, not nn.Linear")
-    
-    weights = first_layer.weight.data.cpu().numpy()
-    importance = np.linalg.norm(weights, axis=0)
-    
-    logger.info(f"  Weight shape: {weights.shape}")
-    logger.info(f"  Importance range: [{importance.min():.6f}, {importance.max():.6f}]")
-    logger.info(f"  CV: {importance.std() / importance.mean():.4f}")
-    
-    return {
-        'importance': importance,
-        'gene_names': gene_names
-    }
-
-
-# =============================================================================
-# Analysis Functions
-# =============================================================================
-
-def compare_importance_methods(
-    ig_results: dict,
-    shap_results: dict,
-    l2_results: dict,
-    logger: logging.Logger
-) -> pd.DataFrame:
-    """
-    Compare rankings between different importance methods.
-    """
-    logger.info("\n" + "="*60)
-    logger.info("COMPARING IMPORTANCE METHODS")
-    logger.info("="*60)
-    
+    attributions = ig_results['attributions_per_sample']
+    sample_ids = ig_results['sample_ids']
     gene_names = ig_results['gene_names']
     
-    # Get importance scores
-    ig_importance = ig_results['importance_magnitude']
-    l2_importance = l2_results['importance']
+    n_samples, n_genes = attributions.shape
+    logger.info(f"    Attribution matrix shape: {n_samples} samples x {n_genes} genes")
     
-    # SHAP may have failed
-    if shap_results is not None:
-        shap_importance = shap_results['importance_magnitude']
-    else:
-        shap_importance = np.full(len(gene_names), np.nan)
+    # 1. Save as CSV (human-readable, larger file)
+    # Create DataFrame with sample IDs as index and gene names as columns
+    attr_df = pd.DataFrame(
+        attributions,
+        index=sample_ids,
+        columns=gene_names
+    )
+    attr_df.index.name = 'sample_id'
     
-    # Create rankings (1 = most important)
-    ig_ranks = stats.rankdata(-ig_importance)  # Negative for descending
-    l2_ranks = stats.rankdata(-l2_importance)
+    csv_path = per_sample_dir / f'{cohort}_attributions_per_sample.csv'
+    attr_df.to_csv(csv_path)
+    logger.info(f"    Saved CSV: {csv_path.name} ({csv_path.stat().st_size / 1e6:.1f} MB)")
     
-    if shap_results is not None:
-        shap_ranks = stats.rankdata(-shap_importance)
-    else:
-        shap_ranks = np.full(len(gene_names), np.nan)
+    # 2. Save as NPY (efficient for loading in Python)
+    npy_path = per_sample_dir / f'{cohort}_attributions_per_sample.npy'
+    np.save(npy_path, attributions)
+    logger.info(f"    Saved NPY: {npy_path.name} ({npy_path.stat().st_size / 1e6:.1f} MB)")
     
-    # Compute rank correlations
-    logger.info("\nSpearman Rank Correlations:")
+    # 3. Save sample metadata
+    metadata = {
+        'sample_ids': sample_ids,
+        'gene_names': gene_names,
+        'n_samples': n_samples,
+        'n_genes': n_genes,
+        'cohort': cohort
+    }
     
-    # IG vs L2
-    corr_ig_l2, p_ig_l2 = stats.spearmanr(ig_importance, l2_importance)
-    logger.info(f"  IG vs L2:   rho = {corr_ig_l2:.4f}, p = {p_ig_l2:.2e}")
+    metadata_path = per_sample_dir / f'{cohort}_attribution_metadata.json'
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    logger.info(f"    Saved metadata: {metadata_path.name}")
     
-    # IG vs SHAP
-    if shap_results is not None:
-        corr_ig_shap, p_ig_shap = stats.spearmanr(ig_importance, shap_importance)
-        logger.info(f"  IG vs SHAP: rho = {corr_ig_shap:.4f}, p = {p_ig_shap:.2e}")
-        
-        corr_shap_l2, p_shap_l2 = stats.spearmanr(shap_importance, l2_importance)
-        logger.info(f"  SHAP vs L2: rho = {corr_shap_l2:.4f}, p = {p_shap_l2:.2e}")
-    else:
-        corr_ig_shap = np.nan
-        corr_shap_l2 = np.nan
-    fixed_names = []
-    for g in gene_names:
-        if hasattr(g, 'item'):
-            fixed_names.append(g.item())
-        elif isinstance(g, np.ndarray):
-            fixed_names.append(str(g.flatten()[0]))
-        else:
-            fixed_names.append(str(g))
-    gene_names = fixed_names
-
-    # Top-50 agreement
-    ig_top50 = get_top_k_genes_as_set(gene_names, ig_importance, 50)
-    l2_top50 = get_top_k_genes_as_set(gene_names, l2_importance, 50)
-    
-    overlap_ig_l2 = len(ig_top50 & l2_top50)
-    logger.info(f"\nTop-50 Gene Overlap:")
-    logger.info(f"  IG vs L2: {overlap_ig_l2}/50 ({100*overlap_ig_l2/50:.1f}%)")
-    
-    if shap_results is not None:
-        shap_top50 = get_top_k_genes_as_set(gene_names, shap_importance, 50)
-        overlap_ig_shap = len(ig_top50 & shap_top50)
-        overlap_shap_l2 = len(shap_top50 & l2_top50)
-        logger.info(f"  IG vs SHAP: {overlap_ig_shap}/50 ({100*overlap_ig_shap/50:.1f}%)")
-        logger.info(f"  SHAP vs L2: {overlap_shap_l2}/50 ({100*overlap_shap_l2/50:.1f}%)")
-        
-    ig_importance = np.array(ig_importance).flatten()
-    l2_importance = np.array(l2_importance).flatten()
-    shap_importance = np.array(shap_importance).flatten()
-    
-    # Create comparison DataFrame
-    comparison_df = pd.DataFrame({
-        'gene_name': list(gene_names) if not isinstance(gene_names, list) else gene_names,
-        'ig_importance': ig_importance,
-        'ig_rank': ig_ranks,
-        'ig_signed': ig_results['importance_signed'],
-        'shap_importance': shap_importance,
-        'shap_rank': shap_ranks,
-        'l2_importance': l2_importance,
-        'l2_rank': l2_ranks
+    # 4. Save per-sample summary statistics
+    sample_summary = pd.DataFrame({
+        'sample_id': sample_ids,
+        'attribution_sum': attributions.sum(axis=1),
+        'attribution_mean': attributions.mean(axis=1),
+        'attribution_std': attributions.std(axis=1),
+        'n_positive': (attributions > 0).sum(axis=1),
+        'n_negative': (attributions < 0).sum(axis=1),
+        'max_attribution': attributions.max(axis=1),
+        'min_attribution': attributions.min(axis=1)
     })
     
-    comparison_df = comparison_df.sort_values('ig_importance', ascending=False)
+    summary_path = per_sample_dir / f'{cohort}_per_sample_summary.csv'
+    sample_summary.to_csv(summary_path, index=False)
+    logger.info(f"    Saved per-sample summary: {summary_path.name}")
     
-    return comparison_df
+    return per_sample_dir
 
 
-def check_cox_gene_overlap(
-    comparison_df: pd.DataFrame,
-    cox_genes_file: Path,
+def save_convergence_results(
+    cohort: str,
+    ig_results: dict,
+    output_dir: Path,
     logger: logging.Logger
-) -> dict:
+):
     """
-    Check how many Cox consensus genes are captured at different k values.
+    Save convergence validation results.
+    
+    Args:
+        cohort: 'tcga' or 'orien'
+        ig_results: Dictionary from compute_integrated_gradients
+        output_dir: Output directory
+        logger: Logger instance
     """
-    logger.info("\n" + "="*60)
-    logger.info("COX GENE OVERLAP ANALYSIS")
-    logger.info("="*60)
+    logger.info(f"\n  Saving convergence results for {cohort.upper()}...")
     
-    # Load Cox genes
-    cox_genes = load_consensus_genes(cox_genes_file)
-    logger.info(f"Cox consensus genes: {len(cox_genes)}")
+    conv_dir = output_dir / "convergence_validation"
+    conv_dir.mkdir(parents=True, exist_ok=True)
     
-    # Check overlap at different k values
-    k_values = [20, 30, 50, 75, 100, 150]
+    # Save convergence deltas
+    deltas_df = pd.DataFrame({
+        'sample_id': ig_results['sample_ids'],
+        'convergence_delta': ig_results['convergence_deltas']
+    })
+    deltas_df.to_csv(conv_dir / f'{cohort}_convergence_deltas.csv', index=False)
     
-    results = {'k': [], 'ig_overlap': [], 'l2_overlap': [], 'shap_overlap': []}
-    
-    logger.info("\nOverlap with Cox genes at different k:")
-    logger.info("-" * 50)
-    
-    for k in k_values:
-        # Top-k genes by each method
-        ig_topk = set(comparison_df.nsmallest(k, 'ig_rank')['gene_name'])
-        l2_topk = set(comparison_df.nsmallest(k, 'l2_rank')['gene_name'])
+    # Save full convergence results if available
+    if ig_results['convergence_results'] is not None:
+        conv_results = ig_results['convergence_results']
         
-        ig_overlap = len(ig_topk & set(cox_genes))
-        l2_overlap = len(l2_topk & set(cox_genes))
+        # Summary JSON
+        summary = {
+            'cohort': cohort,
+            'converged': conv_results['converged'],
+            'tolerance': conv_results['tolerance'],
+            'mean_relative_error': conv_results['mean_relative_error'],
+            'max_relative_error': conv_results['max_relative_error'],
+            'pct_within_tolerance': conv_results['pct_within_tolerance'],
+            'n_samples': conv_results['n_samples'],
+            'n_steps': ig_results['n_steps']
+        }
         
-        results['k'].append(k)
-        results['ig_overlap'].append(ig_overlap)
-        results['l2_overlap'].append(l2_overlap)
+        with open(conv_dir / f'{cohort}_convergence_summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
         
-        # SHAP if available
-        if not comparison_df['shap_rank'].isna().all():
-            shap_topk = set(comparison_df.nsmallest(k, 'shap_rank')['gene_name'])
-            shap_overlap = len(shap_topk & set(cox_genes))
-            results['shap_overlap'].append(shap_overlap)
-        else:
-            results['shap_overlap'].append(np.nan)
+        # Detailed per-sample errors
+        errors_df = pd.DataFrame({
+            'sample_id': ig_results['sample_ids'],
+            'expected_diff': conv_results['expected_diff'],
+            'attribution_sum': conv_results['attribution_sums'],
+            'absolute_error': conv_results['absolute_errors'],
+            'relative_error': conv_results['relative_errors']
+        })
+        errors_df.to_csv(conv_dir / f'{cohort}_convergence_errors.csv', index=False)
         
-        logger.info(f"  k={k:3d}: IG={ig_overlap:2d}/20, L2={l2_overlap:2d}/20, "
-                   f"SHAP={results['shap_overlap'][-1] if not np.isnan(results['shap_overlap'][-1]) else 'N/A'}")
+        logger.info(f"    Saved convergence summary and errors to {conv_dir}")
     
-    # Which Cox genes are captured by IG but not L2?
-    ig_top100 = set(comparison_df.nsmallest(100, 'ig_rank')['gene_name'])
-    l2_top100 = set(comparison_df.nsmallest(100, 'l2_rank')['gene_name'])
-    
-    cox_in_ig_not_l2 = set(cox_genes) & ig_top100 - l2_top100
-    cox_in_l2_not_ig = set(cox_genes) & l2_top100 - ig_top100
-    
-    logger.info(f"\nCox genes in IG top-100 but not L2 top-100: {cox_in_ig_not_l2}")
-    logger.info(f"Cox genes in L2 top-100 but not IG top-100: {cox_in_l2_not_ig}")
-    
-    return results
+    return conv_dir
 
-
-# =============================================================================
-# Save Results
-# =============================================================================
 
 def save_results(
     cohort: str,
@@ -712,31 +775,53 @@ def save_results(
     l2_results: dict,
     comparison_df: pd.DataFrame,
     output_dir: Path,
-    logger: logging.Logger
+    logger: logging.Logger,
+    save_per_sample: bool = True
 ):
-    """Save all results to files."""
+    """
+    Save all results to files.
+    
+    Args:
+        cohort: 'tcga' or 'orien'
+        ig_results: IG results dictionary
+        shap_results: SHAP results dictionary (can be None)
+        l2_results: L2 results dictionary
+        comparison_df: Method comparison DataFrame
+        output_dir: Output directory
+        logger: Logger instance
+        save_per_sample: Whether to save per-sample attributions
+    """
     logger.info(f"\nSaving results to {output_dir}")
     
-    # Save IG importance
+    # Ensure arrays are flattened
+    for results_dict in [ig_results, shap_results]:
+        if results_dict is not None:
+            for key in ['importance_magnitude', 'importance_signed', 'importance_std', 'importance_median']:
+                if key in results_dict and hasattr(results_dict[key], 'shape'):
+                    if len(results_dict[key].shape) > 1:
+                        results_dict[key] = results_dict[key].flatten()
+    
+    # Save IG importance (aggregated)
     ig_df = pd.DataFrame({
         'gene': ig_results['gene_names'],
         'importance_magnitude': ig_results['importance_magnitude'],
         'importance_signed': ig_results['importance_signed'],
-        'importance_std': ig_results['importance_std']
+        'importance_std': ig_results['importance_std'],
+        'importance_median': ig_results.get('importance_median', ig_results['importance_magnitude'])
     }).sort_values('importance_magnitude', ascending=False)
     
     ig_df.to_csv(output_dir / f'{cohort}_ig_importance.csv', index=False)
     logger.info(f"  Saved: {cohort}_ig_importance.csv")
     
+    # Save per-sample attributions
+    if save_per_sample:
+        save_per_sample_attributions(cohort, ig_results, output_dir, logger)
+    
+    # Save convergence results
+    save_convergence_results(cohort, ig_results, output_dir, logger)
     
     # Save SHAP importance (if available)
     if shap_results is not None:
-        for results_dict in [ig_results, shap_results]:
-            if results_dict is not None:
-                for key in ['importance_magnitude', 'importance_signed', 'importance_std']:
-                    if key in results_dict and hasattr(results_dict[key], 'shape'):
-                        if len(results_dict[key].shape) > 1:
-                            results_dict[key] = results_dict[key].flatten()
         shap_df = pd.DataFrame({
             'gene': shap_results['gene_names'],
             'importance_magnitude': shap_results['importance_magnitude'],
@@ -762,6 +847,175 @@ def save_results(
 
 
 # =============================================================================
+# L2 Importance (for comparison)
+# =============================================================================
+
+def compute_l2_importance(
+    model: nn.Module,
+    gene_names: list,
+    logger: logging.Logger
+) -> dict:
+    """
+    Compute L2 norm importance from first layer weights.
+    This is the baseline method - included for comparison.
+    """
+    logger.info("Computing L2 norm importance (baseline method)...")
+    
+    # Get first layer
+    first_layer = model.network[0]
+    if not isinstance(first_layer, nn.Linear):
+        raise TypeError(f"First layer is {type(first_layer)}, not nn.Linear")
+    
+    weights = first_layer.weight.data.cpu().numpy()
+    importance = np.linalg.norm(weights, axis=0)
+    
+    logger.info(f"  Weight shape: {weights.shape}")
+    logger.info(f"  Importance range: [{importance.min():.6f}, {importance.max():.6f}]")
+    logger.info(f"  CV: {importance.std() / importance.mean():.4f}")
+    
+    return {
+        'importance': importance,
+        'gene_names': gene_names
+    }
+
+
+# =============================================================================
+# SHAP Computation (unchanged from original)
+# =============================================================================
+
+def compute_shap_gradientexplainer(
+    model: nn.Module,
+    expr_tensor: torch.Tensor,
+    gene_names: list,
+    device: str,
+    logger: logging.Logger,
+    n_background: int = 100
+) -> dict:
+    """
+    Compute SHAP values using GradientExplainer.
+    """
+    logger.info("Computing SHAP GradientExplainer...")
+    logger.info(f"  Background samples: {n_background}")
+    
+    model = model.to(device)
+    model.eval()
+    
+    n_samples = expr_tensor.shape[0]
+    if n_background >= n_samples:
+        background_idx = np.arange(n_samples)
+    else:
+        np.random.seed(42)
+        background_idx = np.random.choice(n_samples, n_background, replace=False)
+    
+    background = expr_tensor[background_idx].to(device)
+    
+    try:
+        explainer = shap.GradientExplainer(model, background)
+        logger.info("  GradientExplainer created successfully")
+    except Exception as e:
+        logger.error(f"  Failed to create GradientExplainer: {e}")
+        return None
+    
+    logger.info("  Computing SHAP values...")
+    expr_device = expr_tensor.to(device)
+    
+    try:
+        shap_values = explainer.shap_values(expr_device)
+        
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]
+        
+        if torch.is_tensor(shap_values):
+            shap_values = shap_values.cpu().numpy()
+            
+    except Exception as e:
+        logger.error(f"  Failed to compute SHAP values: {e}")
+        return None
+    
+    importance_magnitude = np.abs(shap_values).mean(axis=0)
+    importance_signed = shap_values.mean(axis=0)
+    importance_std = shap_values.std(axis=0)
+    
+    logger.info(f"  SHAP values shape: {shap_values.shape}")
+    logger.info(f"  Importance range: [{importance_magnitude.min():.6f}, {importance_magnitude.max():.6f}]")
+    
+    return {
+        'shap_values_per_sample': shap_values,
+        'importance_magnitude': importance_magnitude,
+        'importance_signed': importance_signed,
+        'importance_std': importance_std,
+        'gene_names': gene_names,
+        'n_samples': n_samples,
+        'n_background': n_background
+    }
+
+
+# =============================================================================
+# Analysis Functions
+# =============================================================================
+
+def compare_importance_methods(
+    ig_results: dict,
+    shap_results: dict,
+    l2_results: dict,
+    logger: logging.Logger
+) -> pd.DataFrame:
+    """
+    Compare rankings between different importance methods.
+    """
+    logger.info("\n" + "="*60)
+    logger.info("COMPARING IMPORTANCE METHODS")
+    logger.info("="*60)
+    
+    gene_names = ig_results['gene_names']
+    
+    ig_importance = ig_results['importance_magnitude']
+    l2_importance = l2_results['importance']
+    
+    if shap_results is not None:
+        shap_importance = shap_results['importance_magnitude']
+    else:
+        shap_importance = np.full(len(gene_names), np.nan)
+    
+    # Create rankings
+    ig_ranks = stats.rankdata(-ig_importance)
+    l2_ranks = stats.rankdata(-l2_importance)
+    
+    if shap_results is not None:
+        shap_ranks = stats.rankdata(-shap_importance)
+    else:
+        shap_ranks = np.full(len(gene_names), np.nan)
+    
+    # Compute correlations
+    logger.info("\nSpearman Rank Correlations:")
+    
+    corr_ig_l2, p_ig_l2 = stats.spearmanr(ig_importance, l2_importance)
+    logger.info(f"  IG vs L2:   rho = {corr_ig_l2:.4f}, p = {p_ig_l2:.2e}")
+    
+    if shap_results is not None:
+        corr_ig_shap, p_ig_shap = stats.spearmanr(ig_importance, shap_importance)
+        logger.info(f"  IG vs SHAP: rho = {corr_ig_shap:.4f}, p = {p_ig_shap:.2e}")
+        
+        corr_shap_l2, p_shap_l2 = stats.spearmanr(shap_importance, l2_importance)
+        logger.info(f"  SHAP vs L2: rho = {corr_shap_l2:.4f}, p = {p_shap_l2:.2e}")
+    
+    # Create comparison DataFrame
+    comparison_df = pd.DataFrame({
+        'gene': gene_names,
+        'ig_importance': ig_importance,
+        'ig_signed': ig_results['importance_signed'],
+        'ig_rank': ig_ranks,
+        'l2_importance': l2_importance,
+        'l2_rank': l2_ranks,
+        'shap_importance': shap_importance,
+        'shap_rank': shap_ranks,
+        'rank_diff_ig_l2': np.abs(ig_ranks - l2_ranks)
+    }).sort_values('ig_importance', ascending=False)
+    
+    return comparison_df
+
+
+# =============================================================================
 # Main Execution
 # =============================================================================
 
@@ -774,7 +1028,10 @@ def process_cohort(
     consensus_genes: list,
     output_dir: Path,
     device: str,
-    logger: logging.Logger
+    logger: logging.Logger,
+    n_steps: int = 50,
+    validate_convergence: bool = True,
+    save_per_sample: bool = True
 ) -> pd.DataFrame:
     """Process a single cohort."""
     logger.info("\n" + "="*70)
@@ -789,12 +1046,13 @@ def process_cohort(
     # Load model
     model = load_model(model_path, params_path, len(gene_names), logger)
     
-    # Compute L2 importance (current method)
+    # Compute L2 importance (baseline method)
     l2_results = compute_l2_importance(model, gene_names, logger)
     
-    # Compute Integrated Gradients
+    # Compute Integrated Gradients (with convergence validation)
     ig_results = compute_integrated_gradients(
-        model, expr_tensor, gene_names, device, logger
+        model, expr_tensor, gene_names, sample_ids,
+        device, logger, n_steps=n_steps, validate=validate_convergence
     )
     
     # Compute SHAP GradientExplainer
@@ -810,7 +1068,7 @@ def process_cohort(
     # Save results
     save_results(
         cohort, ig_results, shap_results, l2_results,
-        comparison_df, output_dir, logger
+        comparison_df, output_dir, logger, save_per_sample=save_per_sample
     )
     
     return comparison_df
@@ -818,12 +1076,20 @@ def process_cohort(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Compute feature importance using Integrated Gradients and SHAP'
+        description='Compute feature importance using Integrated Gradients and SHAP (v2)'
     )
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for model checkpoint (default: 42)')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device: cuda, cpu, or auto (default: auto)')
+    parser.add_argument('--n_steps', type=int, default=50,
+                        help='Number of IG integration steps (default: 50)')
+    parser.add_argument('--validate_convergence', action='store_true',
+                        help='Run full convergence validation')
+    parser.add_argument('--sensitivity_analysis', action='store_true',
+                        help='Run n_steps sensitivity analysis')
+    parser.add_argument('--no_per_sample', action='store_true',
+                        help='Skip saving per-sample attributions')
     
     args = parser.parse_args()
     
@@ -841,11 +1107,15 @@ def main():
     logger = setup_logging(OUTPUT_DIR, args.seed)
     
     logger.info("="*70)
-    logger.info("FEATURE IMPORTANCE COMPUTATION")
+    logger.info("FEATURE IMPORTANCE COMPUTATION (v2)")
     logger.info("Integrated Gradients + SHAP GradientExplainer")
+    logger.info("With Convergence Validation and Per-Sample Attribution")
     logger.info("="*70)
     logger.info(f"Seed: {args.seed}")
     logger.info(f"Device: {device}")
+    logger.info(f"Integration steps: {args.n_steps}")
+    logger.info(f"Convergence validation: {args.validate_convergence}")
+    logger.info(f"Save per-sample: {not args.no_per_sample}")
     logger.info(f"Output: {seed_output_dir}")
     logger.info("="*70)
     
@@ -865,13 +1135,33 @@ def main():
         (orien_model_path, "ORIEN model"),
         (tcga_params_path, "TCGA params"),
         (orien_params_path, "ORIEN params"),
-        (CONSENSUS_GENES_FILE, "Consensus genes"),
-        (COX_GENES_FILE, "Cox genes")
+        (CONSENSUS_GENES_FILE, "Consensus genes")
     ]:
         if not path.exists():
             logger.error(f"{name} not found: {path}")
             sys.exit(1)
         logger.info(f"Found: {name}")
+    
+    # Run sensitivity analysis if requested
+    if args.sensitivity_analysis:
+        logger.info("\n" + "="*70)
+        logger.info("RUNNING N_STEPS SENSITIVITY ANALYSIS")
+        logger.info("="*70)
+        
+        # Load TCGA for sensitivity analysis
+        _, expr_tensor, _, gene_names = load_expression_data(
+            TCGA_EXPR_FILE, TCGA_SURV_FILE, consensus_genes, logger
+        )
+        model = load_model(tcga_model_path, tcga_params_path, len(gene_names), logger)
+        baseline = expr_tensor.mean(dim=0, keepdim=True)
+        
+        sensitivity_df = run_convergence_sensitivity_analysis(
+            model, expr_tensor, baseline, gene_names,
+            device, logger, n_steps_list=[20, 50, 100, 200]
+        )
+        
+        sensitivity_df.to_csv(seed_output_dir / 'convergence_sensitivity_analysis.csv', index=False)
+        logger.info(f"Saved sensitivity analysis to {seed_output_dir}")
     
     # Process TCGA
     tcga_comparison = process_cohort(
@@ -883,7 +1173,10 @@ def main():
         consensus_genes=consensus_genes,
         output_dir=seed_output_dir,
         device=device,
-        logger=logger
+        logger=logger,
+        n_steps=args.n_steps,
+        validate_convergence=args.validate_convergence,
+        save_per_sample=not args.no_per_sample
     )
     
     # Process ORIEN
@@ -896,35 +1189,11 @@ def main():
         consensus_genes=consensus_genes,
         output_dir=seed_output_dir,
         device=device,
-        logger=logger
+        logger=logger,
+        n_steps=args.n_steps,
+        validate_convergence=args.validate_convergence,
+        save_per_sample=not args.no_per_sample
     )
-    
-    # Cox gene overlap analysis
-    logger.info("\n" + "="*70)
-    logger.info("COX GENE OVERLAP ANALYSIS")
-    logger.info("="*70)
-    
-    logger.info("\nTCGA:")
-    tcga_cox_overlap = check_cox_gene_overlap(tcga_comparison, COX_GENES_FILE, logger)
-    
-    logger.info("\nORIEN:")
-    orien_cox_overlap = check_cox_gene_overlap(orien_comparison, COX_GENES_FILE, logger)
-    
-    # Save Cox overlap results
-    cox_overlap_df = pd.DataFrame({
-        'k': tcga_cox_overlap['k'],
-        'tcga_ig_overlap': tcga_cox_overlap['ig_overlap'],
-        'tcga_l2_overlap': tcga_cox_overlap['l2_overlap'],
-        'tcga_shap_overlap': tcga_cox_overlap['shap_overlap'],
-        'orien_ig_overlap': orien_cox_overlap['ig_overlap'],
-        'orien_l2_overlap': orien_cox_overlap['l2_overlap'],
-        'orien_shap_overlap': orien_cox_overlap['shap_overlap']
-    })
-    
-    comparison_dir = OUTPUT_DIR / "comparison_with_l2"
-    comparison_dir.mkdir(parents=True, exist_ok=True)
-    cox_overlap_df.to_csv(comparison_dir / f'cox_gene_overlap_seed{args.seed}.csv', index=False)
-    logger.info(f"\nSaved Cox overlap analysis to: {comparison_dir}")
     
     # Final summary
     logger.info("\n" + "="*70)
@@ -949,7 +1218,12 @@ def main():
     logger.info("COMPLETE")
     logger.info("="*70)
     logger.info(f"Results saved to: {seed_output_dir}")
-    
+    logger.info(f"\nOutput files:")
+    logger.info(f"  - {cohort}_ig_importance.csv (aggregated importance)")
+    logger.info(f"  - per_sample_attributions/{cohort}_attributions_per_sample.csv")
+    logger.info(f"  - per_sample_attributions/{cohort}_attributions_per_sample.npy")
+    logger.info(f"  - convergence_validation/{cohort}_convergence_summary.json")
+
 
 if __name__ == "__main__":
     main()
