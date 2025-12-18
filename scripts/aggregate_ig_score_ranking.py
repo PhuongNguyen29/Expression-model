@@ -21,7 +21,7 @@ Usage:
         --input_dir results_v2/06_importance_methods \
         --output_dir results_v2/06_importance_methods/aggregated \
         --seeds 42 123 456 789 1011 \
-        --k_values 20 50 75 100 150
+        --k_values 
 
 Author: Phuong
 Created: 2025
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Default configuration
 DEFAULT_SEEDS = [42, 123, 456, 789, 1011]
-DEFAULT_K_VALUES = [20, 30, 50, 75, 100, 150]
+DEFAULT_K_VALUES = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180]
 COX_GENES_FILE = "data/raw/cox_consensus_genes_20.txt"
 
 
