@@ -39,6 +39,7 @@ import json
 import argparse
 import logging
 from datetime import datetime
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 import torch
@@ -58,15 +59,12 @@ CONFIG = {
     'inputs_dir': 'results_v2/07_sign_filter_validation/inputs',
     'output_dir': 'results_v2/07_sign_filter_validation',
     
-    # Hyperparameter files
+    # Hyperparameter files (will be loaded from inputs/validation_config.json)
     'best_params_tcga': 'results_v2/02b_biomarker_discovery_ig/k_selection_with_tuning/k140/hyperparameter_tuning/tcga/best_params.json',
     'best_params_orien': 'results_v2/02b_biomarker_discovery_ig/k_selection_with_tuning/k140/hyperparameter_tuning/orien/best_params.json',
     
-    # Data files
-    'expr_tcga': 'data/raw/tcga_batch_corrected_2sv.csv',
-    'expr_orien': 'data/raw/orien_batch_corrected.csv',
-    'surv_tcga': 'data/processed/surv_tcga_harmonized.csv',
-    'surv_orien': 'data/processed/surv_orien_harmonized.csv',
+    # Data directory (passed to load_expression_and_survival_data)
+    'data_dir': 'data',
     
     # Validation settings
     'seeds': [42, 123, 456, 789, 1011],
@@ -82,19 +80,48 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # DATA LOADING FUNCTIONS
 # ============================================================================
-def load_expression_data(expr_file: str, gene_list: list) -> pd.DataFrame:
+def load_expression_and_survival_data(data_dir: str) -> Dict:
     """
-    Load expression data and subset to specified genes.
+    Load all expression and survival data once.
+    
+    MATCHES YOUR EXISTING CODE in run_step2b_crosscohort_validation_only_ig.py
+    
+    Returns:
+        Dict with keys: tcga_expr_raw, orien_expr_raw, tcga_surv, orien_surv
+    """
+    from pathlib import Path
+    data_dir = Path(data_dir)
+    
+    logger.info("Loading expression and survival data...")
+    
+    # Load exactly as your existing code does (index_col=0)
+    tcga_expr_raw = pd.read_csv(data_dir / "raw" / "tcga_batch_corrected_2sv.csv", index_col=0)
+    orien_expr_raw = pd.read_csv(data_dir / "raw" / "orien_batch_corrected.csv", index_col=0)
+    tcga_surv = pd.read_csv(data_dir / "processed" / "surv_tcga_harmonized.csv", index_col=0)
+    orien_surv = pd.read_csv(data_dir / "processed" / "surv_orien_harmonized.csv", index_col=0)
+    
+    logger.info(f"  TCGA: {tcga_expr_raw.shape[1]} samples, {tcga_expr_raw.shape[0]} genes")
+    logger.info(f"  ORIEN: {orien_expr_raw.shape[1]} samples, {orien_expr_raw.shape[0]} genes")
+    
+    return {
+        'tcga_expr_raw': tcga_expr_raw,
+        'orien_expr_raw': orien_expr_raw,
+        'tcga_surv': tcga_surv,
+        'orien_surv': orien_surv
+    }
+
+
+def subset_expression_to_genes(expr_df: pd.DataFrame, gene_list: list) -> pd.DataFrame:
+    """
+    Subset expression data to specified genes.
     
     Args:
-        expr_file: Path to expression CSV (genes × samples)
+        expr_df: Expression DataFrame (genes × samples)
         gene_list: List of gene IDs to select
         
     Returns:
-        Expression DataFrame (genes × samples)
+        Expression DataFrame subset to genes (genes × samples)
     """
-    expr_df = pd.read_csv(expr_file, index_col=0)
-    
     # Handle gene selection
     available_genes = [g for g in gene_list if g in expr_df.index]
     if len(available_genes) < len(gene_list):
@@ -104,34 +131,17 @@ def load_expression_data(expr_file: str, gene_list: list) -> pd.DataFrame:
     return expr_df.loc[available_genes]
 
 
-def load_survival_data(surv_file: str) -> pd.DataFrame:
-    """
-    Load survival data and set index.
-    
-    Args:
-        surv_file: Path to survival CSV
-        
-    Returns:
-        Survival DataFrame with sample_id as index
-    """
-    surv_df = pd.read_csv(surv_file)
-    
-    # Rename columns to match SurvivalDataset expectations
-    # Your dataset expects 'time' and 'event' columns
-    if 'OS_time' in surv_df.columns:
-        surv_df = surv_df.rename(columns={'OS_time': 'time', 'OS_event': 'event'})
-    
-    # Set index
-    if 'sample_id' in surv_df.columns:
-        surv_df = surv_df.set_index('sample_id')
-    
-    return surv_df
-
-
 def create_dataloader(expr_df: pd.DataFrame, surv_df: pd.DataFrame, 
-                      batch_size: int = 32, shuffle: bool = True) -> DataLoader:
+                      batch_size: int = 32, shuffle: bool = True) -> Tuple:
     """
     Create DataLoader using YOUR SurvivalDataset class.
+    
+    Args:
+        expr_df: Expression data (genes × samples)
+        surv_df: Survival data with index = sample IDs
+        
+    Returns:
+        Tuple of (DataLoader, SurvivalDataset)
     """
     dataset = SurvivalDataset(expr_df, surv_df)
     loader = DataLoader(
@@ -267,19 +277,20 @@ def run_validation(gene_set_name: str, gene_set_file: str, output_subdir: str):
     with open(CONFIG['best_params_orien'], 'r') as f:
         params_orien = json.load(f)['best_params']
     
-    # Load expression data
-    logger.info("\nLoading expression data...")
-    expr_tcga = load_expression_data(CONFIG['expr_tcga'], gene_list)
-    expr_orien = load_expression_data(CONFIG['expr_orien'], gene_list)
+    # Load all data using the SAME approach as your existing code
+    data_dict = load_expression_and_survival_data('data')
+    
+    # Subset expression data to gene list
+    expr_tcga = subset_expression_to_genes(data_dict['tcga_expr_raw'], gene_list)
+    expr_orien = subset_expression_to_genes(data_dict['orien_expr_raw'], gene_list)
+    
+    logger.info(f"\nExpression data subset:")
     logger.info(f"  TCGA: {expr_tcga.shape[1]} samples, {expr_tcga.shape[0]} genes")
     logger.info(f"  ORIEN: {expr_orien.shape[1]} samples, {expr_orien.shape[0]} genes")
     
-    # Load survival data
-    logger.info("\nLoading survival data...")
-    surv_tcga = load_survival_data(CONFIG['surv_tcga'])
-    surv_orien = load_survival_data(CONFIG['surv_orien'])
-    logger.info(f"  TCGA: {len(surv_tcga)} samples")
-    logger.info(f"  ORIEN: {len(surv_orien)} samples")
+    # Get survival data
+    surv_tcga = data_dict['tcga_surv']
+    surv_orien = data_dict['orien_surv']
     
     # Create dataloaders
     batch_size = params_tcga.get('batch_size', 32)
