@@ -61,7 +61,10 @@ import sys
 from pathlib import Path
 
 # Add project root to Python path
-project_root = Path(__file__).resolve().parent
+# Script is in: scripts/retune_sign_consensus_genes/
+# Project root is: ../../ (two levels up)
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent.parent  # Go up two levels to Expression-model/
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
