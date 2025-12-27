@@ -68,7 +68,7 @@ from src.models.elastic_deepsurv import ElasticDeepSurv
 from src.utils.batch_samplers import StratifiedBatchSampler
 
 # Import clinical preprocessor
-from clinical_preprocessor import ClinicalPreprocessor, IntegratedPreprocessor, load_clinical_data
+from src.data.clinical_preprocessor import ClinicalPreprocessor, IntegratedPreprocessor, load_clinical_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
