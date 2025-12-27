@@ -660,7 +660,7 @@ def main():
                         help='Path to TCGA hyperparameters')
     parser.add_argument('--orien_params', type=str, default='best_params_orien.json',
                         help='Path to ORIEN hyperparameters')
-    parser.add_argument('--output_dir', type=str, default='results_v2/03_clinical_integration',
+    parser.add_argument('--output_dir', type=str, default='results_v2/08_clinical_integration',
                         help='Output directory')
     parser.add_argument('--epochs', type=int, default=200,
                         help='Number of training epochs')
