@@ -37,7 +37,7 @@ SEEDS = [42, 123, 456, 789, 1011]
 
 # Conservative hyperparameters (no tuning needed)
 CONSERVATIVE_PARAMS = {
-    'hidden_sizes': [24],      # Small: 13 → 32 → 1
+    'hidden_sizes': [48]],      # Small: 13 → 32 → 1
     'dropout': 0.4,            # Conservative dropout
     'alpha': 0.001,            # Moderate regularization
     'l1_ratio': 0.7,           # Sparse
