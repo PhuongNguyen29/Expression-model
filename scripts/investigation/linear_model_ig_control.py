@@ -63,7 +63,7 @@ from captum.attr import IntegratedGradients
 
 from src.models.elastic_deepsurv import ElasticDeepSurv, ElasticDeepSurvTrainer
 from src.data.dataset import SurvivalDataset
-from src.data.batch_samplers import StratifiedBatchSampler
+from src.utils.batch_samplers import StratifiedBatchSampler
 
 # =============================================================================
 # Configuration (same paths as compute_shap_ig_importance.py)
