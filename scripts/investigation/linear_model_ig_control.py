@@ -56,9 +56,8 @@ from pathlib import Path
 
 # Add project root to path
 script_dir = Path(__file__).resolve().parent
-project_root = script_dir.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+project_root = script_dir.parent.parent  # Go up two levels to Expression-model/
+sys.path.insert(0, str(project_root))
 
 from captum.attr import IntegratedGradients
 
